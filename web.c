@@ -305,8 +305,8 @@ void api_page(void) {
 /*
 /api/data/{PUBLIC_ID}/{PERIOD}/{BACK}
 
-{PERIOD} is either 3h, 6h, 12h, 3d, 7d, 14d, 28d, 3m, 6m, 1y, 2y
-{BACK} is a positive (or 0) integer that indicated how many periods it should go back, i.e. when BACK=0 and PERIOD=3h, the last 3 hours will be sent, when BACK=1 and PERIOD=3h the 3 hours before that, and so forth.
+{PERIOD} is either 6h, 12h, 3d, 7d, 14d, 28d, 3m, 6m, 1y, 2y
+{BACK} is a positive (or 0) integer that indicated how many periods it should go back, i.e. when BACK=0 and PERIOD=6h, the last 6 hours will be sent, when BACK=1 and PERIOD=6h the 6 hours before that, and so forth.
 
 DATA_ELEMENT=cpu_usage: double, cpu_iowait: double, cpu_steal: double, ram_usage: double, swap_usage: double, disk_usage: double, rx_bytes_per_second: uint, tx_bytes_per_second: uint, disk_read_bytes_per_second: uint, disk_write_bytes_per_second: uint. Any of those values may be missing if they are hidden, to figure out what values are hidden, details or hidden can be used.
 Output json:

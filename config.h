@@ -12,4 +12,5 @@
 
 #define SERVER_LISTEN_BACKLOG SOMAXCONN
 
+#define MAX_LATENCY_TARGETS 16
 // #define LISTEN_ALL // this is necessary for docker as otherwise it will not be reachable from outside of the container itself

@@ -185,6 +185,7 @@ enum {
         *monitors = page_monitors;
     return PAGE_SUCCESS;
 }
+#define SHOULD_SHOW(i) (admin || monitor->public || !should_hide[i])
 #define HANDLE_HIDE(type) \
     if (!admin && !monitor->public && should_hide[SHOULD_HIDE_##type]) \
         json_object_array_add(monitor_data, minus_one); \
@@ -228,6 +229,54 @@ json_object *get_monitor_details_json(monitor_details_t *monitor, json_object *m
             HANDLE_HIDE(IO) json_object_array_add(monitor_data, json_object_new_uint64(0));
             HANDLE_HIDE(IO) json_object_array_add(monitor_data, json_object_new_uint64(0));
         }
+        int32 avg_lat = -1;
+    if (SHOULD_SHOW(SHOULD_HIDE_LATENCY) && monitor->latency_fd != -1) {
+            uint32 valid_target_ids[16];
+            uint32 num_valid_targets = 0;
+            json_object *monitor_obj, *latency_targets_config = NULL;
+            if (json_object_object_get_ex(monitors, monitor->public_token, &monitor_obj) && json_object_is_type(monitor_obj, json_type_array)) {
+                if (json_object_array_length(monitor_obj) > 6 && (latency_targets_config = json_object_array_get_idx(monitor_obj, 6)) && json_object_is_type(latency_targets_config, json_type_array)) {
+                    uint32 num_targets = json_object_array_length(latency_targets_config);
+                    for (uint32 v_idx = 0; v_idx < num_targets && v_idx < 16; v_idx++) {
+                        json_object *target_obj = json_object_array_get_idx(latency_targets_config, v_idx);
+                        json_object *id_obj;
+                        if (json_object_object_get_ex(target_obj, "id", &id_obj)) {
+                            valid_target_ids[num_valid_targets++] = json_object_get_int(id_obj);
+                        }
+                    }
+                }
+            }
+
+            uint32 lat_file_len = fd_size(monitor->latency_fd);
+            uint32 aligned_lat_file_len = lat_file_len - (lat_file_len % sizeof(latency_stat_t));
+            if (aligned_lat_file_len >= sizeof(latency_stat_t)) {
+                latency_stat_t l_buf[20];
+                uint32 to_read = min(aligned_lat_file_len, sizeof(l_buf));
+                to_read -= to_read % sizeof(latency_stat_t);
+                if (to_read > 0 && pread(monitor->latency_fd, l_buf, to_read, aligned_lat_file_len - to_read) > 0) {
+                    uint32 count = to_read / sizeof(latency_stat_t);
+                    uint64 sum = 0;
+                    uint32 valid = 0;
+                    for (uint32 i = 0; i < count; i++) {
+                        int is_valid = 0;
+                        for (uint32 v = 0; v < num_valid_targets; v++) {
+                            if (valid_target_ids[v] == l_buf[i].id) {
+                                is_valid = 1;
+                                break;
+                            }
+                        }
+                        if (!is_valid) continue;
+
+                        if (l_buf[i].latency_ms != -1) {
+                            sum += l_buf[i].latency_ms;
+                            valid++;
+                        }
+                    }
+                    if (valid > 0) avg_lat = sum / valid;
+                }
+            }
+        }
+        json_object_array_add(monitor_data, json_object_new_int(avg_lat));
     } else if (monitor->was_online && down_seconds != (uint32)-1)
         json_object_array_add(monitor_data, json_object_new_uint64(down_seconds - 60));
     else
@@ -235,7 +284,7 @@ json_object *get_monitor_details_json(monitor_details_t *monitor, json_object *m
     return monitor_data;
 }
 
-#define SHOULD_SHOW(i) (admin || monitor->public || !should_hide[i])
+
 
 void api_page_add_element(json_object *response_monitors, uint64 *rx, uint64 *tx, json_object *monitor_name, json_object *public_id, const char *public_id_str, uint32 now, int32 id, bool admin) {
     monitor_details_t *monitor = id == -1 ? get_monitor_details_by_public(public_id_str) : &details[id];
@@ -357,7 +406,7 @@ void api_data(void) {
             return;
     public_id[32] = '\0';
     monitor_details_t *monitor = get_monitor_details_by_public(public_id);
-    json_object *monitor_obj, *name, *response, *details_json, *max_json, *avg_json, *traffic_json = NULL, *io_json = NULL, *data_json, *hidden_json, *notes;
+    json_object *monitor_obj, *name, *response, *details_json, *max_json, *avg_json, *traffic_json = NULL, *io_json = NULL, *data_json, *hidden_json, *notes, *latency_json;
     bool admin = is_logged_in();
     if (!monitor || !json_object_object_get_ex(monitors, public_id, &monitor_obj) || !json_object_is_type(monitor_obj, json_type_array) || !(name = json_object_array_get_idx(monitor_obj, 1)) || !json_object_is_type(name, json_type_string) || !(notes = json_object_array_get_idx(monitor_obj, 3)))
         return;
@@ -386,14 +435,31 @@ void api_data(void) {
         (SHOULD_SHOW(SHOULD_HIDE_TOTAL_TRAFFIC) && (!(traffic_json = json_object_new_array()) || json_object_object_add(response, "traffic", traffic_json))) ||
         (SHOULD_SHOW(SHOULD_HIDE_TOTAL_IO) && (!(io_json = json_object_new_array()) || json_object_object_add(response, "io", io_json))) ||
         !(data_json = json_object_new_object()) ||
+        !(latency_json = json_object_new_object()) ||
         !(hidden_json = json_object_new_array()) ||
         json_object_object_add(response, "details", get_monitor_details_json(monitor, name, now, admin)) ||
         json_object_object_add(response, "max", max_json) ||
         json_object_object_add(response, "avg", avg_json) ||
         json_object_object_add(response, "data", data_json) ||
+        json_object_object_add(response, "latency", latency_json) ||
         json_object_object_add(response, "hidden", hidden_json) ||
         json_object_object_add(response, "notes", notes))
         return;
+        
+    json_object *latency_targets_config = NULL;
+    uint32 valid_target_ids[16];
+    uint32 num_valid_targets = 0;
+    if (json_object_array_length(monitor_obj) > 6 && (latency_targets_config = json_object_array_get_idx(monitor_obj, 6)) && json_object_is_type(latency_targets_config, json_type_array)) {
+        json_object_object_add(response, "latency_targets", json_object_get(latency_targets_config));
+        uint32 num_targets = json_object_array_length(latency_targets_config);
+        for (uint32 v_idx = 0; v_idx < num_targets && v_idx < 16; v_idx++) {
+            json_object *target_obj = json_object_array_get_idx(latency_targets_config, v_idx);
+            json_object *id_obj;
+            if (json_object_object_get_ex(target_obj, "id", &id_obj)) {
+                valid_target_ids[num_valid_targets++] = json_object_get_int(id_obj);
+            }
+        }
+    }
     uint32 file_len = fd_size(monitor->fd), total_elements = file_len / sizeof(stats_t), go_back_n_elements = elements * (back + 1), pos = 0, average_over_n_elements = elements / 360,
            count_for_avg = 0,
            count_for_datapoint_avg = 0,
@@ -413,12 +479,14 @@ void api_data(void) {
     uint16 count_of_datapoints = 0;
     int32 read_len;
     bool save_because_downtime = false;
+    uint32 first_stat_time = 0;
     while (remaining_read && (read_len = pread(monitor->fd, http_buf, min(remaining_read, min(sizeof(stats_t) * (sizeof(http_buf) / sizeof(stats_t)), file_len - pos)), pos)) > 0) {
         uint16 count = read_len / sizeof(stats_t);
         pos += count * sizeof(stats_t);
         remaining_read -= count * sizeof(stats_t);
         for (uint16 i = 0; i < count; ++i) {
             stats_t *element = (stats_t *)http_buf + i;
+            if (!first_stat_time) first_stat_time = element->time;
             double data[6] = { TO_DOUBLE_FROM_TWO_UINTS(element->cpu_usage), TO_DOUBLE_FROM_TWO_UINTS(element->cpu_iowait), TO_DOUBLE_FROM_TWO_UINTS(element->cpu_steal), TO_DOUBLE_FROM_TWO_UINTS(element->ram_usage), TO_DOUBLE_FROM_TWO_UINTS(element->swap_usage), TO_DOUBLE_FROM_TWO_UINTS(element->disk_usage) };
             uint32 time_diff = last_time ? element->time - last_time : CONFIG_MEASURE_EVERY_N_SECONDS;
             if (time_diff > (32 * (average_over_n_elements + 3))) {
@@ -472,6 +540,106 @@ void api_data(void) {
             json_object_object_add(data_json, buf, data_element);
         }
     }
+
+    IF_SHOULD_SHOW(SHOULD_HIDE_LATENCY) {
+    if (monitor->latency_fd != -1 && first_stat_time > 0 && last_time > first_stat_time) {
+        uint32 lat_file_len = fd_size(monitor->latency_fd);
+        uint32 lat_window_sec = (last_time - first_stat_time) / 360;
+        if (lat_window_sec < 60) lat_window_sec = 60;
+        uint32 lat_pos = lat_file_len - (lat_file_len % sizeof(latency_stat_t));
+        int32 lat_read_len;
+        
+        typedef struct { uint32 id; uint64 sum_lat; uint32 valid_count; uint32 total_count; } lat_agg_t;
+        lat_agg_t aggs[16];
+        uint32 aggs_count = 0;
+        uint64 window_time_sum = 0;
+        uint32 window_time_count = 0;
+        uint32 current_window_end_time = 0;
+
+        #define FLUSH_LATENCY_AGG() \
+            if (aggs_count > 0 && window_time_count > 0) { \
+                json_object *data_element = json_object_new_array(); \
+                char buf[16]; \
+                snprintf(buf, sizeof(buf), "%lu", (unsigned long)(window_time_sum / window_time_count)); \
+                for (uint32 a_idx = 0; a_idx < aggs_count; a_idx++) { \
+                    json_object *entry = json_object_new_object(); \
+                    int32 avg_lat = aggs[a_idx].valid_count > 0 ? (int32)(aggs[a_idx].sum_lat / aggs[a_idx].valid_count) : -1; \
+                    json_object_object_add(entry, "id", json_object_new_int(aggs[a_idx].id)); \
+                    json_object_object_add(entry, "latency_ms", json_object_new_int(avg_lat)); \
+                    int32 loss_pct = aggs[a_idx].total_count > 0 ? ((aggs[a_idx].total_count - aggs[a_idx].valid_count) * 100 / aggs[a_idx].total_count) : 0; \
+                    json_object_object_add(entry, "loss_pct", json_object_new_int(loss_pct)); \
+                    json_object_array_add(data_element, entry); \
+                } \
+                json_object_object_add(latency_json, buf, data_element); \
+                aggs_count = 0; \
+                window_time_sum = 0; \
+                window_time_count = 0; \
+            }
+
+        while (lat_pos > 0) {
+            uint32 to_read = min(sizeof(latency_stat_t) * (sizeof(http_buf) / sizeof(latency_stat_t)), lat_pos);
+            lat_pos -= to_read;
+            lat_read_len = pread(monitor->latency_fd, http_buf, to_read, lat_pos);
+            if (lat_read_len <= 0) break;
+            
+            uint32 count = lat_read_len / sizeof(latency_stat_t);
+            for (int32 i = count - 1; i >= 0; i--) {
+                latency_stat_t *element = (latency_stat_t *)http_buf + i;
+                
+                int is_valid = 0;
+                for (uint32 v = 0; v < num_valid_targets; v++) {
+                    if (valid_target_ids[v] == element->id) {
+                        is_valid = 1;
+                        break;
+                    }
+                }
+                if (!is_valid) continue;
+
+                if (element->time > last_time + 60) continue;
+                if (element->time < first_stat_time) {
+                    lat_pos = 0;
+                    break;
+                }
+                if (current_window_end_time == 0 || element->time > current_window_end_time) {
+                    current_window_end_time = element->time;
+                }
+                if (current_window_end_time > element->time && (current_window_end_time - element->time) >= lat_window_sec) {
+                    FLUSH_LATENCY_AGG();
+                    current_window_end_time = element->time;
+                }
+                int found = 0;
+                for (uint32 a = 0; a < aggs_count; a++) {
+                    if (aggs[a].id == element->id) {
+                            if (element->latency_ms != -1) {
+                            aggs[a].sum_lat += element->latency_ms;
+                            aggs[a].valid_count++;
+                        }
+                        aggs[a].total_count++;
+                        found = 1;
+                        break;
+                    }
+                }
+            if (!found && aggs_count < 16) {
+                    aggs[aggs_count].id = element->id;
+                        if (element->latency_ms != -1) {
+                        aggs[aggs_count].sum_lat = element->latency_ms;
+                        aggs[aggs_count].valid_count = 1;
+                    } else {
+                        aggs[aggs_count].sum_lat = 0;
+                        aggs[aggs_count].valid_count = 0;
+                    }
+                    aggs[aggs_count].total_count = 1;
+                    aggs_count++;
+                }
+                window_time_sum += element->time;
+                window_time_count++;
+            }
+        }
+        FLUSH_LATENCY_AGG();
+        #undef FLUSH_LATENCY_AGG
+    }
+    }
+
     ADD_DATA(max_json, max[i], max_uint[i]);
     if (count_for_avg) {
         ADD_DATA(avg_json, sum_for_avg[i] / count_for_avg, sum_for_avg_uint[i] / count_for_avg);

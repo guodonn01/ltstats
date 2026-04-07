@@ -40,10 +40,12 @@ typedef int64_t    int64;
 inline void str_nullbyte(char *dest, uint16 *dest_len) {
     dest[*dest_len] = '\0';
 }
+#ifndef bool
 typedef uint8      bool;
 
 #define false 0
 #define true  1
+#endif
 
 #define COMPILE_TIME_ASSERT(c) (void)sizeof(char[-!(c)?-!(c):1])
 #define SLEN(s) s, strlen(s) // for constant strings, this usually can be optimized away
@@ -91,6 +93,24 @@ typedef struct PACKED {
     uint64 read_sectors : 48;
     uint64 written_sectors : 48;
 } stats_t;
+
+typedef struct PACKED {
+    char token[33];
+    uint8 count;
+} latency_req_header_t;
+
+typedef struct PACKED {
+    uint32 id;
+    uint32 time;
+    int32 latency_ms;
+} latency_stat_t;
+
+typedef struct PACKED {
+    uint32 id;
+    uint8 type;
+    uint16 port;
+    char target[128];
+} latency_target_t;
 
 #define COMPILE_TIME_CHECKS \
     COMPILE_TIME_ASSERT(sizeof(net_header_t) == 35); \

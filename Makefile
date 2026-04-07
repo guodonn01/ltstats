@@ -11,7 +11,7 @@ ltstats_agent: ${MUSL} libbearssl.a TA.h
 	strip ltstats_agent
 libbearssl.a:
 	git clone https://www.bearssl.org/git/BearSSL
-	sh -c 'cd BearSSL && git checkout ${BEARSSL_COMMIT} && make -j$$(nproc) && cp build/libbearssl.a ..'
+	sh -c 'cd BearSSL && git checkout ${BEARSSL_COMMIT} && make CC=../${MUSL} -j$$(nproc) && cp build/libbearssl.a ..'
 libjson-c.a:
 	git clone https://github.com/json-c/json-c.git
 	sh -c 'cd json-c && git checkout ${JSON_C_COMMIT} && export CC=../${MUSL} && cmake -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DDISABLE_JSON_POINTER=ON -DENABLE_THREADING=OFF -DDISABLE_EXTRA_LIBS=ON -DDISABLE_THREAD_LOCAL_STORAGE=ON -DHAVE_SETLOCALE=0 -DHAVE_USELOCALE=0 -DHAVE_ARC4RANDOM=0 . && make -j$$(nproc) && cp libjson-c.a ..'

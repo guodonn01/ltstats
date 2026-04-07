@@ -24,6 +24,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <stdio.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <fcntl.h>
@@ -65,6 +66,7 @@ typedef struct {
     char token[33];
     char public_token[33];
     int fd;
+    int latency_fd;
     bool was_online;
     uint8 time_diff;
     details_t details;
@@ -80,13 +82,15 @@ typedef struct {
     char token[33];
     char public_token[33];
     int fd;
-    bool notification_sent[11]; // offline, cpu_usage, cpu_iowait, cpu_steal, ram_usage, swap_usage, disk_usage, net_rx_bps, net_tx_bps, disk_read_bps, disk_write_tx_bps
+    int latency_fd;
+    bool notification_sent[12]; // offline, cpu_usage, cpu_iowait, cpu_steal, ram_usage, swap_usage, disk_usage, net_rx_bps, net_tx_bps, disk_read_bps, disk_write_tx_bps, latency_ms
     json_object *name;
     json_object *monitoring_settings;
 } notification_monitor_details_t;
 
 typedef struct {
     int fd; // close if close_at >= current, and fd != -1
+    int latency_fd;
     time_t close_at;
 } close_fds_t;
 
@@ -113,9 +117,10 @@ enum {
     SHOULD_HIDE_DISK_SIZE = 13,
     SHOULD_HIDE_DISK_USAGE = 14,
     SHOULD_HIDE_NET = 15,
-    SHOULD_HIDE_IO = 16
+    SHOULD_HIDE_IO = 16,
+    SHOULD_HIDE_LATENCY = 17
 };
-bool should_hide[17];
+bool should_hide[18];
 const char *admin_hash;
 int client, status_page_fd, monitor_page_fd, admin_page_fd, favicon_ico_fd;
 int32 len;

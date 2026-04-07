@@ -163,8 +163,10 @@ bool parse_data_json(void) {
         MONITORS_FOREACH
                 if (MONITORS_FOREACH_TOKEN_CHECK || !(new_details[current_details_pos].name = json_object_array_get_idx(val, 1)) || !(new_details[current_details_pos].monitoring_settings = json_object_array_get_idx(val, 4))) {
                     for (uint32 new_details_pos = 0; new_details_pos < current_details_pos; ++new_details_pos) // close fds of new monitors
-                        if (!get_notification_monitor_details_by_private(new_details[new_details_pos].token))
+                        if (!get_notification_monitor_details_by_private(new_details[new_details_pos].token)) {
                             close(new_details[new_details_pos].fd);
+                            if (new_details[new_details_pos].latency_fd != -1) close(new_details[new_details_pos].latency_fd);
+                        }
                     free(new_details);
                     return false;
                 }
@@ -173,16 +175,22 @@ bool parse_data_json(void) {
                 notification_monitor_details_t *tmp_monitor;
                 if ((tmp_monitor = get_notification_monitor_details_by_private(token_str))) {
                     new_details[current_details_pos].fd = tmp_monitor->fd;
+                    new_details[current_details_pos].latency_fd = tmp_monitor->latency_fd;
                     memcpy(&new_details[current_details_pos].notification_sent, &tmp_monitor->notification_sent, sizeof(new_details[current_details_pos].notification_sent));
                 } else {
                     new_details[current_details_pos].fd = open_with_retries(token_str, O_RDWR | O_CREAT | O_APPEND);
+                    char latency_filename[64];
+                    snprintf(latency_filename, sizeof(latency_filename), "%s_latency", token_str);
+                    new_details[current_details_pos].latency_fd = open_with_retries(latency_filename, O_RDWR | O_CREAT | O_APPEND);
                     memset(&new_details[current_details_pos].notification_sent, 0, sizeof(new_details[current_details_pos].notification_sent));
                 }
         MONITORS_FOREACH_END
         if (notification_details) {
             for (uint32 details_pos = 0; details_pos < details_count; ++details_pos)
-                if (!json_object_object_get_ex(monitors, notification_details[details_pos].public_token, &tmp_json))
+                if (!json_object_object_get_ex(monitors, notification_details[details_pos].public_token, &tmp_json)) {
                     close(notification_details[details_pos].fd);
+                    if (notification_details[details_pos].latency_fd != -1) close(notification_details[details_pos].latency_fd);
+                }
             free(notification_details);
         }
         details_count = new_details_count;
@@ -218,6 +226,7 @@ bool parse_data_json(void) {
         HIDE_KEY_CASE("DISK_USAGE", SHOULD_HIDE_DISK_USAGE)
         HIDE_KEY_CASE("NET", SHOULD_HIDE_NET)
         HIDE_KEY_CASE("IO", SHOULD_HIDE_IO)
+        HIDE_KEY_CASE("LATENCY", SHOULD_HIDE_LATENCY)
         return false; // if none of the cases matches
     }
     monitor_details_t *new_details = NULL;
@@ -227,8 +236,10 @@ bool parse_data_json(void) {
         json_object *is_public;
         if (MONITORS_FOREACH_TOKEN_CHECK || !(is_public = json_object_array_get_idx(val, 2)) || !json_object_is_type(is_public, json_type_boolean)) {
             for (uint32 new_details_pos = 0; new_details_pos < current_details_pos; ++new_details_pos) // close fds of new monitors
-                if (!get_monitor_details_by_private(new_details[new_details_pos].token))
+                if (!get_monitor_details_by_private(new_details[new_details_pos].token)) {
                     close(new_details[new_details_pos].fd);
+                    if (new_details[new_details_pos].latency_fd != -1) close(new_details[new_details_pos].latency_fd);
+                }
             free(new_details);
             return false;
         }
@@ -238,6 +249,7 @@ bool parse_data_json(void) {
         monitor_details_t *tmp_monitor;
         if ((tmp_monitor = get_monitor_details_by_private(token_str))) {
             new_details[current_details_pos].fd = tmp_monitor->fd;
+            new_details[current_details_pos].latency_fd = tmp_monitor->latency_fd;
             new_details[current_details_pos].was_online = tmp_monitor->was_online;
             new_details[current_details_pos].rx_total = tmp_monitor->rx_total;
             new_details[current_details_pos].tx_total = tmp_monitor->tx_total;
@@ -251,6 +263,9 @@ bool parse_data_json(void) {
         } else {
             new_details[current_details_pos].was_online = false;
             new_details[current_details_pos].fd = open_with_retries(token_str, O_RDWR | O_CREAT | O_APPEND);
+            char latency_filename[64];
+            snprintf(latency_filename, sizeof(latency_filename), "%s_latency", token_str);
+            new_details[current_details_pos].latency_fd = open_with_retries(latency_filename, O_RDWR | O_CREAT | O_APPEND);
             load_totals(&new_details[current_details_pos]);
         }
     MONITORS_FOREACH_END
@@ -281,8 +296,10 @@ bool parse_data_json(void) {
 close_fds_alloc_err:
                     if (new_details) {
                         for (uint32 new_details_pos = 0; new_details_pos < new_details_count; ++new_details_pos) // close fds of new monitors
-                            if (!get_monitor_details_by_private(new_details[new_details_pos].token))
+                            if (!get_monitor_details_by_private(new_details[new_details_pos].token)) {
                                 close(new_details[new_details_pos].fd);
+                                if (new_details[new_details_pos].latency_fd != -1) close(new_details[new_details_pos].latency_fd);
+                            }
                         free(new_details);
                     }
                     close_fds_count = old_close_fds_count;
@@ -299,8 +316,12 @@ close_fds_alloc_err:
                         }
                     if (!already_in_close_fds) {
                         close_fds[pos].fd = details[details_pos].fd;
+                        close_fds[pos].latency_fd = details[details_pos].latency_fd;
                         close_fds[pos].close_at = monotonic_time.tv_sec + 30;
                         unlink(details[details_pos].token);
+                        char latency_filename[64];
+                        snprintf(latency_filename, sizeof(latency_filename), "%s_latency", details[details_pos].token);
+                        unlink(latency_filename);
                         ++pos;
                     }
                 }
@@ -324,6 +345,10 @@ void check_close_fds(void) {
             if (close_fds[i].close_at <= monotonic_time.tv_sec) {
                 close(close_fds[i].fd);
                 close_fds[i].fd = -1;
+                if (close_fds[i].latency_fd != -1) {
+                    close(close_fds[i].latency_fd);
+                    close_fds[i].latency_fd = -1;
+                }
             } else
                 ++real_count;
         }
@@ -433,7 +458,11 @@ JSON format of data.json (PUBLIC_TOKEN and private_token should be unique and ra
             - disk_read_bps: false or int (bps is bytes per second)
             - disk_write_tx_bps: false or int (bps is bytes per second)
         - additional_paths: array of strings, additional mounted paths to be monitored (/ will always be monitored). Specifying paths that result in one partition/filesystem to be monitored more than once may result in disk usage/totals/IO to be incorrect.
- pages: object
+        - latency_monitors: array of objects (optional)
+            - id: int
+            - type: string ("icmp" or "tcp")
+            - port: int (only used if type is "tcp", othe
+        pages: object
     {PATH}: array
         - name: string
         - public: boolean
@@ -556,7 +585,7 @@ start:
             uint32 total_count = 0, count;
             int32 read_len;
             uint32 last_time = 0;
-            uint64 averages[10];
+                uint64 averages[11];
             while (pos < data.st_size && (read_len = pread(details->fd, http_buf, min(sizeof(stats_t) * (sizeof(http_buf) / sizeof(stats_t)), (uint64)(data.st_size - pos)), pos)) > 0) {
                 count = read_len / sizeof(stats_t);
                 pos += count * sizeof(stats_t);
@@ -591,8 +620,63 @@ start:
                 uint_totals[y] /= total_count;
                 averages[y + 6] = uint_totals[y];
             }
+                
+                int32 avg_lat = -1;
+                if (details->latency_fd != -1) {
+                    uint32 valid_target_ids[16];
+                    uint32 num_valid_targets = 0;
+                    json_object *monitor_obj, *latency_targets_config = NULL;
+                    if (json_object_object_get_ex(monitors, details->public_token, &monitor_obj) && json_object_is_type(monitor_obj, json_type_array)) {
+                        if (json_object_array_length(monitor_obj) > 6 && (latency_targets_config = json_object_array_get_idx(monitor_obj, 6)) && json_object_is_type(latency_targets_config, json_type_array)) {
+                            uint32 num_targets = json_object_array_length(latency_targets_config);
+                            for (uint32 v_idx = 0; v_idx < num_targets && v_idx < 16; v_idx++) {
+                                json_object *target_obj = json_object_array_get_idx(latency_targets_config, v_idx);
+                                json_object *id_obj;
+                                if (json_object_object_get_ex(target_obj, "id", &id_obj)) {
+                                    valid_target_ids[num_valid_targets++] = json_object_get_int(id_obj);
+                                }
+                            }
+                        }
+                    }
+
+                    uint32 lat_file_len = fd_size(details->latency_fd);
+                    uint32 cutoff_time = now - (sample_count * 60);
+                    int64 scan_pos = lat_file_len - (lat_file_len % sizeof(latency_stat_t));
+                    latency_stat_t l_buf[20];
+                    int32 lat_read_len;
+                    uint64 lat_sum = 0;
+                    uint32 lat_valid = 0;
+                    while (scan_pos > 0) {
+                        uint32 to_read = min((uint32)sizeof(l_buf), (uint32)scan_pos);
+                        scan_pos -= to_read;
+                        lat_read_len = pread(details->latency_fd, l_buf, to_read, scan_pos);
+                        if (lat_read_len <= 0) break;
+                        uint32 lcount = lat_read_len / sizeof(latency_stat_t);
+                        int stop = 0;
+                        for (int32 i = lcount - 1; i >= 0; i--) {
+                            int is_valid = 0;
+                            for (uint32 v = 0; v < num_valid_targets; v++) {
+                                if (valid_target_ids[v] == l_buf[i].id) {
+                                    is_valid = 1;
+                                    break;
+                                }
+                            }
+                            if (!is_valid) continue;
+
+                            if (l_buf[i].time < cutoff_time) { stop = 1; break; }
+                            if (l_buf[i].latency_ms != -1) {
+                                lat_sum += l_buf[i].latency_ms;
+                                lat_valid++;
+                            }
+                        }
+                        if (stop) break;
+                    }
+                    if (lat_valid > 0) avg_lat = lat_sum / lat_valid;
+                }
+                averages[10] = avg_lat > 0 ? avg_lat : 0;
+
             char *types[] = {
-                "CPU_USAGE", "CPU_IOWAIT", "CPU_STEAL", "RAM_USAGE", "SWAP_USAGE", "DISK_USAGE", "NET_RX", "NET_TX", "DISK_READ", "DISK_WRITE"
+                    "CPU_USAGE", "CPU_IOWAIT", "CPU_STEAL", "RAM_USAGE", "SWAP_USAGE", "DISK_USAGE", "NET_RX", "NET_TX", "DISK_READ", "DISK_WRITE", "LATENCY"
             };
             for (uint8 y = 1; y < sizeof(details->notification_sent); ++y) {
                 json_object *element = json_object_array_get_idx(details->monitoring_settings, y);
@@ -630,7 +714,7 @@ monitoring_server PATH MAX_CHILDREN [LISTEN_PORT]
 int main(int argc, char **argv) {
     COMPILE_TIME_CHECKS
     int32 max_children;
-    uint16 port = 9999, expected_len, body;
+    uint16 port = 9999, expected_len, body = 0;
     if ((argc != 3 && argc != 4) || chdir(argv[1]) || !(max_children = (int32)strtoul(argv[2], NULL, 10)) || (argc == 4 && !(port = (uint16)strtoul(argv[3], NULL, 10)))) {
         write(2, SLEN("Missing/invalid argument(s)!\nmonitoring_server PATH MAX_CHILDREN [LISTEN_PORT]\nFor details, look into the README.\n"));
         return 99;
@@ -713,26 +797,24 @@ int main(int argc, char **argv) {
         }
         if (http_buf[1] != 'O') // POST
             goto cont;
-        if (http_buf_compare("POST /", "submit")) { // POST /submit: new data
+        if (http_buf_compare("POST /", "submit") || http_buf_compare("POST /", "latency") || http_buf_compare("POST /", "latency_config")) {
             body = get_http_body();
-            if (!body) { // caddy seems to send the request in pieces, not optimal as this will block the main process longer, but I don't see a better way with the current architecture
+            if (!body) {
                 if (sock_ready(client, true, 1)) {
                     int tmp = read(client, http_buf + len, sizeof(http_buf) - len);
-                    if (tmp <= 0)
-                        goto cont;
+                    if (tmp <= 0) goto cont;
                     len += tmp;
                     body = get_http_body();
-                    if (!body || len == body)
-                        goto cont;
-                } else
-                    goto cont;
+                    if (!body || len == body) goto cont;
+                } else goto cont;
             }
             if (len == body && sock_ready(client, true, 1)) {
                 len = read(client, http_buf, sizeof(http_buf));
-                if (len == -1)
-                    goto cont;
+                if (len == -1) goto cont;
                 body = 0;
             }
+        }
+        if (http_buf_compare("POST /", "submit")) {
             if ((uint32)len < body + sizeof(net_header_t) + sizeof(details_t))
                 goto cont;
             ptr_header = (net_header_t *)(http_buf + body);
@@ -799,6 +881,71 @@ success:
                 if (sock_ready(client, false, 1))
                     write(client, SLEN("HTTP/1.1 200\r\nContent-Length: 1\r\nConnection: close\r\n\r\n1"));
             }
+            goto cont;
+        }
+        if (http_buf_compare("POST /", "latency_config")) {
+            if ((uint32)len < (uint32)(body + 32)) goto cont;
+            char token[33];
+            memcpy(token, http_buf + body, 32);
+            token[32] = '\0';
+            
+            monitor_details_t *monitor = get_monitor_details_by_private(token);
+            if (!monitor) goto cont;
+            
+            json_object *monitor_obj, *latency_monitors;
+            if (json_object_object_get_ex(monitors, monitor->public_token, &monitor_obj) &&
+                json_object_is_type(monitor_obj, json_type_array) &&
+                (latency_monitors = json_object_array_get_idx(monitor_obj, 6)) != NULL &&
+                json_object_is_type(latency_monitors, json_type_array)) {
+                
+                uint32 count = json_object_array_length(latency_monitors);
+                uint32 response_len = sizeof(uint32) + count * sizeof(latency_target_t);
+                
+                uint16 hdr_len = 0;
+                str_append(http_buf, &hdr_len, "HTTP/1.1 200\r\nContent-Length: ");
+                str_append_uint(http_buf, &hdr_len, response_len);
+                str_append(http_buf, &hdr_len, "\r\nConnection: close\r\n\r\n");
+                
+                client_write_len(http_buf, hdr_len);
+                client_write_len((char*)&count, sizeof(uint32));
+                
+                for (uint32 i = 0; i < count; i++) {
+                    json_object *lm = json_object_array_get_idx(latency_monitors, i);
+                    json_object *j_id, *j_type, *j_port, *j_target;
+                    latency_target_t lt;
+                    memset(&lt, 0, sizeof(lt));
+                    if (json_object_object_get_ex(lm, "id", &j_id)) lt.id = json_object_get_int(j_id);
+                    if (json_object_object_get_ex(lm, "type", &j_type)) {
+                        const char *type_str = json_object_get_string(j_type);
+                        if (strcmp(type_str, "icmp") == 0) lt.type = 1;
+                        else lt.type = 0;
+                    }
+                    if (json_object_object_get_ex(lm, "port", &j_port)) lt.port = json_object_get_int(j_port);
+                    if (json_object_object_get_ex(lm, "target", &j_target)) strncpy(lt.target, json_object_get_string(j_target), sizeof(lt.target) - 1);
+                    client_write_len((char*)&lt, sizeof(latency_target_t));
+                }
+            } else {
+                uint32 zero_count = 0;
+                client_write("HTTP/1.1 200\r\nContent-Length: 4\r\nConnection: close\r\n\r\n");
+                client_write_len((char*)&zero_count, 4);
+            }
+            goto cont;
+        }
+        if (http_buf_compare("POST /", "latency")) {
+            if ((uint32)len < body + sizeof(latency_req_header_t)) goto cont;
+            latency_req_header_t *l_header = (latency_req_header_t *)(http_buf + body);
+            char token[33];
+            memcpy(token, l_header->token, 32);
+            token[32] = '\0';
+            monitor_details_t *monitor = get_monitor_details_by_private(token);
+            if (!monitor) goto cont;
+            if (l_header->count > (sizeof(http_buf) - body - sizeof(latency_req_header_t)) / sizeof(latency_stat_t)) goto cont;
+            if ((uint32)len < body + sizeof(latency_req_header_t) + l_header->count * sizeof(latency_stat_t)) goto cont;
+            latency_stat_t *l_stats = (latency_stat_t *)(http_buf + body + sizeof(latency_req_header_t));
+            if (monitor->latency_fd != -1) {
+                if (write(monitor->latency_fd, l_stats, sizeof(latency_stat_t) * l_header->count) == -1) {}
+            }
+            client_write("HTTP/1.1 200\r\nContent-Length: 1\r\nConnection: close\r\n\r\n1");
             goto cont;
         }
         if (http_buf_compare("POST ", "/admin")) {

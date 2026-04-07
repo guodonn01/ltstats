@@ -18,6 +18,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 #include "include.h"
 #include <unistd.h>
+#include <stdio.h>
 #include <fcntl.h>
 #include <string.h>
 #include <stdlib.h>
@@ -33,6 +34,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #include <sys/stat.h>
 #include <poll.h>
 #include <sys/sysinfo.h>
+#include <pthread.h>
 #include <netinet/tcp.h>
 #include "BearSSL/inc/bearssl.h"
 #include "config.h"
@@ -54,11 +56,12 @@ typedef struct PACKED {
     uint64 total;
 } jiffies_spent_t;
 
-char file_buf[49152], http_buf[512 + sizeof(net_header_t) + sizeof(details_t) + (CONFIG_UPLOAD_MAX_N_STATS_AT_ONCE * sizeof(stats_t))], response_buf[1024], iobuf[BR_SSL_BUFSIZE_BIDI], *host;
+char file_buf[49152], http_buf[512 + sizeof(net_header_t) + sizeof(details_t) + (CONFIG_UPLOAD_MAX_N_STATS_AT_ONCE * sizeof(stats_t))], iobuf[BR_SSL_BUFSIZE_BIDI], *host;
+char latency_http_buf[512 + sizeof(latency_req_header_t) + (MAX_LATENCY_TARGETS * sizeof(latency_stat_t))], response_buf[1024], latency_response_buf[512 + sizeof(uint32) + (MAX_LATENCY_TARGETS * sizeof(latency_target_t))];
 details_t details;
 stats_t stats[CONFIG_MAX_CACHED];
 uint32 stats_count = 0, stats_pos = (uint32)-1;
-uint16 http_req_len;
+uint16 http_req_len, latency_http_req_len;
 stats_t *current_stats;
 net_header_t header;
 jiffies_spent_t cpu_start, cpu_end;
@@ -69,6 +72,11 @@ br_x509_minimal_context minimal_context;
 br_sslio_context sslio_context;
 char **mount_paths = NULL;
 char *mount_paths_default[] = { "/", NULL };
+
+latency_target_t latency_targets[MAX_LATENCY_TARGETS];
+uint32 latency_targets_count = 0;
+latency_stat_t latency_stats[MAX_LATENCY_TARGETS];
+uint32 latency_stats_count = 0;
 
 #define IN_READ(ptr) (ptr < (file_buf + read_len))
 
@@ -177,7 +185,8 @@ void get_network_stats(uint64 *rx, uint64 *tx) {
 void get_disk_stats(uint64 *sectors_read, uint64 *sectors_written) {
     *sectors_read = *sectors_written = 0;
     OPEN_READ("/proc/diskstats", return;, 32)
-    char *ptr = file_buf, *device_name;
+    char *ptr = file_buf; 
+    char *device_name = NULL;
     while (IN_READ(ptr)) {
         for (uint8 i = 0; i < 3; ++i) {
             while (isspace(*ptr) && IN_READ(ptr)) ++ptr;
@@ -389,12 +398,12 @@ int setup_bearssl_connection(int *fd) {
     return 0;
 }
 
-int send_https_request(void) {
+int send_https_request(char *req_buf, uint16 req_len, char *resp_buf, size_t resp_size) {
     int fd, err = setup_bearssl_connection(&fd), ret = -6;
-    int16 len;
+    int16 len = 0, r;
     if (err)
         return err;
-    if (br_sslio_write_all(&sslio_context, http_buf, http_req_len)) {
+    if (br_sslio_write_all(&sslio_context, req_buf, req_len)) {
         br_sslio_close(&sslio_context);
         close(fd);
         return -4;
@@ -404,13 +413,13 @@ int send_https_request(void) {
         close(fd);
         return -5;
     }
-    if ((len = br_sslio_read(&sslio_context, &response_buf, sizeof(response_buf))) >= (int16)strlen("HTTP/1.1 200\r\n\r\n"))
-        for (uint16 i = strlen("HTTP/1.1 200\r\n\r\n"); i < len; ++i)
-            if (response_buf[i] == '\n' && response_buf[i - 2] == '\n' && response_buf[i - 1] == '\r' && response_buf[i - 3] == '\r') {
-                if (len >= i + 1 && response_buf[i + 1] == '1')
-                    ret = 0;
-                break;
-            }
+    while (len < (int16)(resp_size - 1) && (r = br_sslio_read(&sslio_context, resp_buf + len, resp_size - 1 - len)) > 0) {
+        len += r;
+    }
+    resp_buf[len] = '\0';
+    if (len >= 12 && !memcmp(resp_buf, "HTTP/1.1 200", 12)) {
+        ret = len; // Return the read length on success
+    }
     br_sslio_close(&sslio_context);
     close(fd);
     return ret;
@@ -424,7 +433,10 @@ bool collect(void) {
         stats_pos = 0;
     current_stats = &stats[stats_pos];
 
-    sleep(CONFIG_MEASURE_EVERY_N_SECONDS);
+    uint32 target_time = time(NULL) + CONFIG_MEASURE_EVERY_N_SECONDS;
+    while (time(NULL) < target_time) {
+        sleep(target_time - time(NULL));
+    }
     get_current_jiffies(&cpu_end);
     get_network_stats(&net_rx_end, &net_tx_end);
     get_disk_stats(&disk_sectors_read_end, &disk_sectors_written_end);
@@ -502,15 +514,178 @@ upload_data:
             pos = 0;
         str_append_len(http_buf, &http_req_len, (char *)&stats[pos], sizeof(stats_t));
     }
-    if (send_https_request()) {
+    if (send_https_request(http_buf, http_req_len, response_buf, sizeof(response_buf)) <= 0) {
         sleep(1);
-        if (!send_https_request())
+        if (send_https_request(http_buf, http_req_len, response_buf, sizeof(response_buf)) > 0)
             goto success;
     } else {
 success:
         if (stats_count -= header.stats_count)
             goto upload_data;
     }
+}
+
+int32 tcp_ping(const char *target, uint16 port) {
+    struct addrinfo hints, *res;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    char port_str[16];
+    snprintf(port_str, sizeof(port_str), "%u", port);
+    if (getaddrinfo(target, port_str, &hints, &res) != 0) return -1;
+    int sock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    if (sock < 0) { freeaddrinfo(res); return -1; }
+    int flags = fcntl(sock, F_GETFL, 0);
+    fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+    struct timeval start, end;
+    gettimeofday(&start, NULL);
+    connect(sock, res->ai_addr, res->ai_addrlen);
+    struct pollfd pfd;
+    pfd.fd = sock;
+    pfd.events = POLLOUT;
+    int32 latency = -1;
+    if (poll(&pfd, 1, 10000) > 0) {
+        int err = 0;
+        socklen_t len = sizeof(err);
+        if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &err, &len) == 0 && err == 0) {
+            gettimeofday(&end, NULL);
+            latency = (end.tv_sec - start.tv_sec) * 1000 + (end.tv_usec - start.tv_usec) / 1000;
+        }
+    }
+    close(sock);
+    freeaddrinfo(res);
+    return latency;
+}
+
+bool is_valid_target(const char *target) {
+    if (!target || !*target) return false;
+    for (int i = 0; target[i]; i++) {
+        char c = target[i];
+        if (!isalnum(c) && c != '.' && c != '-' && c != ':') return false;
+    }
+    return true;
+}
+
+int32 icmp_ping(const char *target) {
+    if (!is_valid_target(target)) return -1;
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd), "ping -c 1 -w 10 %s", target);
+    FILE *fp = popen(cmd, "r");
+    if (!fp) return -1;
+    char line[256];
+    int32 latency = -1;
+    while (fgets(line, sizeof(line), fp)) {
+        char *p = strstr(line, "time=");
+        if (p) {
+            latency = (int32)strtod(p + 5, NULL);
+            break;
+        }
+    }
+    pclose(fp);
+    return latency;
+}
+
+struct worker_args {
+    int start_idx;
+    int count;
+};
+
+void *latency_worker(void *arg) {
+    struct worker_args *args = (struct worker_args *)arg;
+    for (int i = args->start_idx; i < args->start_idx + args->count; ++i) {
+        latency_target_t *t = &latency_targets[i];
+        int32 lat = -1;
+        if (t->type == 0) {
+            lat = tcp_ping(t->target, t->port);
+        } else {
+            lat = icmp_ping(t->target);
+        }
+        latency_stats[i].id = t->id;
+        latency_stats[i].time = time(NULL);
+        latency_stats[i].latency_ms = lat;
+    }
+    return NULL;
+}
+
+void collect_latency(void) {
+    if (latency_targets_count == 0) return;
+    int num_threads = (latency_targets_count + 4) / 5;
+    pthread_t threads[num_threads];
+    struct worker_args args[num_threads];
+    for (int i = 0; i < num_threads; ++i) {
+        args[i].start_idx = i * 5;
+        args[i].count = (latency_targets_count - args[i].start_idx) > 5 ? 5 : (latency_targets_count - args[i].start_idx);
+        pthread_create(&threads[i], NULL, latency_worker, &args[i]);
+    }
+    for (int i = 0; i < num_threads; ++i) {
+        pthread_join(threads[i], NULL);
+    }
+    latency_stats_count = latency_targets_count;
+}
+
+void fetch_latency_config(void) {
+    latency_http_req_len = 0;
+    str_append(latency_http_buf, &latency_http_req_len, "POST /latency_config HTTP/1.1\r\nHost: ");
+    str_append(latency_http_buf, &latency_http_req_len, host);
+    str_append(latency_http_buf, &latency_http_req_len, "\r\nContent-Length: 32\r\nConnection: close\r\n\r\n");
+    str_append_len(latency_http_buf, &latency_http_req_len, header.token, 32);
+    
+    int resp_len = send_https_request(latency_http_buf, latency_http_req_len, latency_response_buf, sizeof(latency_response_buf));
+    if (resp_len > 0) {
+        char *body = strstr(latency_response_buf, "\r\n\r\n");
+        if (body) {
+            body += 4;
+            if (resp_len >= (body - latency_response_buf) + (int)sizeof(uint32)) {
+                uint32 count = 0;
+                memcpy(&count, body, sizeof(uint32));
+                body += sizeof(uint32);
+                latency_targets_count = count > MAX_LATENCY_TARGETS ? MAX_LATENCY_TARGETS : count;
+                
+                uint32 max_available = (resp_len - (body - latency_response_buf)) / sizeof(latency_target_t);
+                if (latency_targets_count > max_available) latency_targets_count = max_available;
+                for (uint32 i = 0; i < latency_targets_count; i++) {
+                    memcpy(&latency_targets[i], body, sizeof(latency_target_t));
+                    body += sizeof(latency_target_t);
+                }
+            }
+        }
+    }
+}
+
+void upload_latency(void) {
+    if (latency_stats_count == 0) return;
+    latency_req_header_t l_header;
+    memcpy(l_header.token, header.token, 32);
+    l_header.count = latency_stats_count;
+    uint32 content_length = sizeof(latency_req_header_t) + sizeof(latency_stat_t) * latency_stats_count;
+    
+    latency_http_req_len = 0;
+    str_append(latency_http_buf, &latency_http_req_len, "POST /latency HTTP/1.1\r\nHost: ");
+    str_append(latency_http_buf, &latency_http_req_len, host);
+    str_append(latency_http_buf, &latency_http_req_len, "\r\nContent-Length: ");
+    str_append_uint(latency_http_buf, &latency_http_req_len, content_length);
+    str_append(latency_http_buf, &latency_http_req_len, "\r\nConnection: close\r\n\r\n");
+    str_append_len(latency_http_buf, &latency_http_req_len, (char *)&l_header, sizeof(latency_req_header_t));
+    str_append_len(latency_http_buf, &latency_http_req_len, (char *)latency_stats, sizeof(latency_stat_t) * latency_stats_count);
+    send_https_request(latency_http_buf, latency_http_req_len, latency_response_buf, sizeof(latency_response_buf));
+}
+
+void *latency_loop(void *arg) {
+    (void)arg;
+    int ticks = 0;
+    for (;;) {
+        if (ticks % 10 == 0) {
+            fetch_latency_config();
+        }
+        collect_latency();
+        upload_latency();
+        uint32 target_time = time(NULL) + 60;
+        while (time(NULL) < target_time) {
+            sleep(target_time - time(NULL));
+        }
+        ticks++;
+    }
+    return NULL;
 }
 
 void collect_and_upload(void) {
@@ -549,6 +724,8 @@ int main(int argc, char **argv) {
     get_network_stats(&net_rx_start, &net_tx_start);
     get_disk_stats(&disk_sectors_read_start, &disk_sectors_written_start);
     get_current_jiffies(&cpu_start);
+    pthread_t l_thread;
+    pthread_create(&l_thread, NULL, latency_loop, NULL);
     for (;;)
         collect_and_upload();
     return 0;

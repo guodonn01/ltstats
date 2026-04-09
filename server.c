@@ -103,22 +103,56 @@ json_object *load_json_file(char *name) {
     return ret;
 }
 
-void load_totals(monitor_details_t *monitor) { // http_buf is used even though this is no HTTP, but this isn't problematic
+time_t get_next_reset_time(uint8 billing_day, time_t from_time) {
+    struct tm tm_info;
+    gmtime_r(&from_time, &tm_info);
+    if (tm_info.tm_mday >= billing_day) {
+        tm_info.tm_mon += 1;
+        if (tm_info.tm_mon > 11) {
+            tm_info.tm_mon = 0;
+            tm_info.tm_year += 1;
+        }
+    }
+    tm_info.tm_mday = billing_day;
+    tm_info.tm_hour = 0;
+    tm_info.tm_min = 0;
+    tm_info.tm_sec = 0;
+    return timegm(&tm_info);
+}
+
+void load_totals(monitor_details_t *monitor) {
     monitor->rx_total = monitor->tx_total = monitor->sectors_read_total = monitor->sectors_written_total = 0;
+    monitor->monthly_rx_total = monitor->monthly_tx_total = 0;
+    monitor->monthly_rx_offset = monitor->monthly_tx_offset = 0;
+    monitor->next_reset_time = 0;
+
     uint32 file_len = fd_size(monitor->fd), pos = 0;
     int32 read_len;
     if (!file_len) // problematic in case fstat failed, but not much else to do here...
         return;
-    while (pos < file_len && (read_len = pread(monitor->fd, http_buf, min(sizeof(stats_t) * (sizeof(http_buf) / sizeof(stats_t)), file_len - pos), pos)) > 0) {
+    stats_t buf[256];
+    while (pos < file_len && (read_len = pread(monitor->fd, buf, min(sizeof(buf), file_len - pos), pos)) > 0) {
         uint16 count = read_len / sizeof(stats_t);
         pos += count * sizeof(stats_t);
         for (uint16 i = 0; i < count; ++i) {
-            stats_t *element = (stats_t *)http_buf + i;
+            stats_t *element = &buf[i];
+            if (monitor->monthly_traffic_enabled) {
+                if (monitor->next_reset_time == 0 || element->time >= monitor->next_reset_time) {
+                    monitor->next_reset_time = get_next_reset_time(monitor->monthly_billing_day, element->time);
+                    monitor->monthly_rx_offset = monitor->rx_total;
+                    monitor->monthly_tx_offset = monitor->tx_total;
+                }
+            }
+
             monitor->rx_total += element->rx_bytes;
             monitor->tx_total += element->tx_bytes;
             monitor->sectors_read_total += element->read_sectors;
             monitor->sectors_written_total += element->written_sectors;
         }
+    }
+    if (monitor->monthly_traffic_enabled) {
+        monitor->monthly_rx_total = monitor->rx_total - monitor->monthly_rx_offset;
+        monitor->monthly_tx_total = monitor->tx_total - monitor->monthly_tx_offset;
     }
 }
 
@@ -172,17 +206,46 @@ bool parse_data_json(void) {
                 }
                 memcpy(new_details[current_details_pos].token, token_str, 33); // also copy nullbyte
                 memcpy(new_details[current_details_pos].public_token, key, 33); // also copy nullbyte
+                
+                json_object *monthly_traffic_obj;
+                new_details[current_details_pos].monthly_traffic_enabled = false;
+                new_details[current_details_pos].monthly_billing_day = 1;
+                if (json_object_array_length(val) > 7 && (monthly_traffic_obj = json_object_array_get_idx(val, 7)) && json_object_is_type(monthly_traffic_obj, json_type_object)) {
+                    json_object *enabled_obj, *billing_day_obj;
+                    if (json_object_object_get_ex(monthly_traffic_obj, "enabled", &enabled_obj) && json_object_is_type(enabled_obj, json_type_boolean) &&
+                        json_object_object_get_ex(monthly_traffic_obj, "billing_day", &billing_day_obj) && json_object_is_type(billing_day_obj, json_type_int)) {
+                        new_details[current_details_pos].monthly_traffic_enabled = json_object_get_boolean(enabled_obj);
+                        new_details[current_details_pos].monthly_billing_day = json_object_get_int(billing_day_obj);
+                    }
+                }
+                
                 notification_monitor_details_t *tmp_monitor;
                 if ((tmp_monitor = get_notification_monitor_details_by_private(token_str))) {
                     new_details[current_details_pos].fd = tmp_monitor->fd;
                     new_details[current_details_pos].latency_fd = tmp_monitor->latency_fd;
                     memcpy(&new_details[current_details_pos].notification_sent, &tmp_monitor->notification_sent, sizeof(new_details[current_details_pos].notification_sent));
+                    new_details[current_details_pos].next_reset_time = tmp_monitor->next_reset_time;
+                    new_details[current_details_pos].rx_total = tmp_monitor->rx_total;
+                    new_details[current_details_pos].tx_total = tmp_monitor->tx_total;
+                    new_details[current_details_pos].monthly_rx_offset = tmp_monitor->monthly_rx_offset;
+                    new_details[current_details_pos].monthly_tx_offset = tmp_monitor->monthly_tx_offset;
+                    new_details[current_details_pos].monthly_rx_total = tmp_monitor->monthly_rx_total;
+                    new_details[current_details_pos].monthly_tx_total = tmp_monitor->monthly_tx_total;
+                    new_details[current_details_pos].last_file_size = tmp_monitor->last_file_size;
                 } else {
                     new_details[current_details_pos].fd = open_with_retries(token_str, O_RDWR | O_CREAT | O_APPEND);
                     char latency_filename[64];
                     snprintf(latency_filename, sizeof(latency_filename), "%s_latency", token_str);
                     new_details[current_details_pos].latency_fd = open_with_retries(latency_filename, O_RDWR | O_CREAT | O_APPEND);
                     memset(&new_details[current_details_pos].notification_sent, 0, sizeof(new_details[current_details_pos].notification_sent));
+                    new_details[current_details_pos].next_reset_time = 0;
+                    new_details[current_details_pos].rx_total = 0;
+                    new_details[current_details_pos].tx_total = 0;
+                    new_details[current_details_pos].monthly_rx_offset = 0;
+                    new_details[current_details_pos].monthly_tx_offset = 0;
+                    new_details[current_details_pos].monthly_rx_total = 0;
+                    new_details[current_details_pos].monthly_tx_total = 0;
+                    new_details[current_details_pos].last_file_size = 0;
                 }
         MONITORS_FOREACH_END
         if (notification_details) {
@@ -246,6 +309,19 @@ bool parse_data_json(void) {
         memcpy(new_details[current_details_pos].token, token_str, 33); // also copy nullbyte
         memcpy(new_details[current_details_pos].public_token, key, 33); // also copy nullbyte
         new_details[current_details_pos].public = json_object_get_boolean(is_public);
+        
+        json_object *monthly_traffic_obj;
+        new_details[current_details_pos].monthly_traffic_enabled = false;
+        new_details[current_details_pos].monthly_billing_day = 1;
+        if (json_object_array_length(val) > 7 && (monthly_traffic_obj = json_object_array_get_idx(val, 7)) && json_object_is_type(monthly_traffic_obj, json_type_object)) {
+            json_object *enabled_obj, *billing_day_obj;
+            if (json_object_object_get_ex(monthly_traffic_obj, "enabled", &enabled_obj) && json_object_is_type(enabled_obj, json_type_boolean) &&
+                json_object_object_get_ex(monthly_traffic_obj, "billing_day", &billing_day_obj) && json_object_is_type(billing_day_obj, json_type_int)) {
+                new_details[current_details_pos].monthly_traffic_enabled = json_object_get_boolean(enabled_obj);
+                new_details[current_details_pos].monthly_billing_day = json_object_get_int(billing_day_obj);
+            }
+        }
+
         monitor_details_t *tmp_monitor;
         if ((tmp_monitor = get_monitor_details_by_private(token_str))) {
             new_details[current_details_pos].fd = tmp_monitor->fd;
@@ -259,6 +335,16 @@ bool parse_data_json(void) {
                 new_details[current_details_pos].time_diff = tmp_monitor->time_diff;
                 memcpy(&new_details[current_details_pos].details, &tmp_monitor->details, sizeof(details_t));
                 memcpy(&new_details[current_details_pos].stats, &tmp_monitor->stats, sizeof(stats_t));
+            }
+            if (new_details[current_details_pos].monthly_traffic_enabled != tmp_monitor->monthly_traffic_enabled || 
+                new_details[current_details_pos].monthly_billing_day != tmp_monitor->monthly_billing_day) {
+                load_totals(&new_details[current_details_pos]);
+            } else {
+                new_details[current_details_pos].monthly_rx_offset = tmp_monitor->monthly_rx_offset;
+                new_details[current_details_pos].monthly_tx_offset = tmp_monitor->monthly_tx_offset;
+                new_details[current_details_pos].next_reset_time = tmp_monitor->next_reset_time;
+                new_details[current_details_pos].monthly_rx_total = tmp_monitor->monthly_rx_total;
+                new_details[current_details_pos].monthly_tx_total = tmp_monitor->monthly_tx_total;
             }
         } else {
             new_details[current_details_pos].was_online = false;
@@ -553,7 +639,7 @@ start:
         uint32 time_start = time(NULL);
         for (uint32 i = 0; i < details_count; ++i) {
             notification_monitor_details_t *details = &notification_details[i];
-            if (!json_object_is_type(details->monitoring_settings, json_type_array) || json_object_array_length(details->monitoring_settings) != sizeof(details->notification_sent))
+                if (!json_object_is_type(details->monitoring_settings, json_type_array))
                 continue;
             struct stat data;
             if (fstat(details->fd, &data) == -1 || data.st_mtim.tv_sec <= 0 || data.st_size <= 0)
@@ -577,6 +663,38 @@ start:
                 details->notification_sent[0] = false;
                 notify(exec, details->name, details->public_token, "DOWN", false);
             }
+            
+            if (details->monthly_traffic_enabled) {
+                if (details->last_file_size > (uint64)data.st_size) {
+                    details->last_file_size = 0;
+                    details->rx_total = 0;
+                    details->tx_total = 0;
+                    details->next_reset_time = 0;
+                    details->monthly_rx_offset = 0;
+                    details->monthly_tx_offset = 0;
+                }
+                uint64 read_pos = details->last_file_size;
+                int32 read_len;
+                stats_t buf[256];
+                while (read_pos < (uint64)data.st_size && (read_len = pread(details->fd, buf, min((uint64)sizeof(buf), (uint64)(data.st_size - read_pos)), read_pos)) > 0) {
+                    uint16 count = read_len / sizeof(stats_t);
+                    read_pos += count * sizeof(stats_t);
+                    for (uint16 j = 0; j < count; ++j) {
+                        stats_t *element = &buf[j];
+                        if (details->next_reset_time == 0 || element->time >= details->next_reset_time) {
+                            details->next_reset_time = get_next_reset_time(details->monthly_billing_day, element->time);
+                            details->monthly_rx_offset = details->rx_total;
+                            details->monthly_tx_offset = details->tx_total;
+                        }
+                        details->rx_total += element->rx_bytes;
+                        details->tx_total += element->tx_bytes;
+                    }
+                }
+                details->last_file_size = read_pos;
+                details->monthly_rx_total = details->rx_total - details->monthly_rx_offset;
+                details->monthly_tx_total = details->tx_total - details->monthly_tx_offset;
+            }
+
             int64 pos = data.st_size - (sample_count * sizeof(stats_t));
             if (pos < 0)
                 pos = 0;
@@ -585,7 +703,7 @@ start:
             uint32 total_count = 0, count;
             int32 read_len;
             uint32 last_time = 0;
-                uint64 averages[11];
+                uint64 averages[14];
             while (pos < data.st_size && (read_len = pread(details->fd, http_buf, min(sizeof(stats_t) * (sizeof(http_buf) / sizeof(stats_t)), (uint64)(data.st_size - pos)), pos)) > 0) {
                 count = read_len / sizeof(stats_t);
                 pos += count * sizeof(stats_t);
@@ -675,10 +793,21 @@ start:
                 }
                 averages[10] = avg_lat > 0 ? avg_lat : 0;
 
+            if (details->monthly_traffic_enabled) {
+                averages[11] = (details->monthly_rx_total + details->monthly_tx_total) * 10 / 9;
+                averages[12] = details->monthly_rx_total * 10 / 9;
+                averages[13] = details->monthly_tx_total * 10 / 9;
+            } else {
+                averages[11] = 0;
+                averages[12] = 0;
+                averages[13] = 0;
+            }
+
             char *types[] = {
-                    "CPU_USAGE", "CPU_IOWAIT", "CPU_STEAL", "RAM_USAGE", "SWAP_USAGE", "DISK_USAGE", "NET_RX", "NET_TX", "DISK_READ", "DISK_WRITE", "LATENCY"
+                    "CPU_USAGE", "CPU_IOWAIT", "CPU_STEAL", "RAM_USAGE", "SWAP_USAGE", "DISK_USAGE", "NET_RX", "NET_TX", "DISK_READ", "DISK_WRITE", "LATENCY", "TRAFFIC_TOTAL", "TRAFFIC_RX", "TRAFFIC_TX"
             };
-            for (uint8 y = 1; y < sizeof(details->notification_sent); ++y) {
+            uint8 num_settings = json_object_array_length(details->monitoring_settings);
+            for (uint8 y = 1; y < num_settings && y < sizeof(details->notification_sent); ++y) {
                 json_object *element = json_object_array_get_idx(details->monitoring_settings, y);
                 uint64 threshold;
                 if (!element || !json_object_is_type(element, json_type_int) || !(threshold = json_object_get_uint64(element)))
@@ -863,10 +992,23 @@ int main(int argc, char **argv) {
                 } else
                     goto cont;
                 for (uint8 i = 0; i < ptr_header->stats_count; ++i) { // not done in the above loop because only now all data is validated and saved
+                    if (monitor->monthly_traffic_enabled) {
+                        if (monitor->next_reset_time == 0 || ptr_stats[i].time >= monitor->next_reset_time) {
+                            monitor->next_reset_time = get_next_reset_time(monitor->monthly_billing_day, ptr_stats[i].time);
+                            monitor->monthly_rx_offset = monitor->rx_total;
+                            monitor->monthly_tx_offset = monitor->tx_total;
+                        }
+                    }
+
                     monitor->rx_total += ptr_stats[i].rx_bytes;
                     monitor->tx_total += ptr_stats[i].tx_bytes;
                     monitor->sectors_read_total += ptr_stats[i].read_sectors;
                     monitor->sectors_written_total += ptr_stats[i].written_sectors;
+                    
+                    if (monitor->monthly_traffic_enabled) {
+                        monitor->monthly_rx_total = monitor->rx_total - monitor->monthly_rx_offset;
+                        monitor->monthly_tx_total = monitor->tx_total - monitor->monthly_tx_offset;
+                    }
                 }
                 if (ptr_header->includes_details) {
                     monitor->was_online = true;

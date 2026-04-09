@@ -653,6 +653,14 @@ void api_data(void) {
         json_object_array_add(traffic_json, json_object_new_uint64(monitor->rx_total));
         json_object_array_add(traffic_json, json_object_new_uint64(monitor->tx_total));
     }
+    if (monitor->monthly_traffic_enabled && SHOULD_SHOW(SHOULD_HIDE_TOTAL_TRAFFIC)) {
+        json_object *monthly_traffic_json = json_object_new_array();
+        if (monthly_traffic_json) {
+            json_object_array_add(monthly_traffic_json, json_object_new_uint64(monitor->monthly_rx_total));
+            json_object_array_add(monthly_traffic_json, json_object_new_uint64(monitor->monthly_tx_total));
+            json_object_object_add(response, "monthly_traffic", monthly_traffic_json);
+        }
+    }
     IF_SHOULD_SHOW(SHOULD_HIDE_TOTAL_IO) {
         json_object_array_add(io_json, json_object_new_uint64(total_uint[2]));
         json_object_array_add(io_json, json_object_new_uint64(total_uint[3]));

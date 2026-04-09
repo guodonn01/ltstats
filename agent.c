@@ -78,6 +78,8 @@ uint32 latency_targets_count = 0;
 latency_stat_t latency_stats[MAX_LATENCY_TARGETS];
 uint32 latency_stats_count = 0;
 
+pthread_mutex_t ssl_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 #define IN_READ(ptr) (ptr < (file_buf + read_len))
 
 #define DOUBLE_TO_TWO_UINT8(name, v) \
@@ -257,6 +259,56 @@ void copy_cpu_model(void) {
             memcpy(details.cpu_model, ptr, len);
             details.cpu_model_len = len;
         }
+    } else {
+	FILE *fp;
+        char buffer[1024];
+        int cpu_count = -1;
+        char model_name[256] = {0};
+        uint32 i = 0;
+
+        fp = popen("lscpu", "r");
+        if (fp == NULL) {
+            perror("Failed to run lscpu command");
+            strcpy(details.cpu_model, "unknown");
+            details.cpu_model_len = 8;
+        }
+
+        while (fgets(buffer, sizeof(buffer), fp) != NULL) {
+            if (strncmp(buffer, "CPU(s):", 7) == 0) {
+                const char *ptr = buffer + 7;
+                while (*ptr && isspace((unsigned char)*ptr)) {
+                    ptr++;
+                }
+                sscanf(ptr, "%d", &cpu_count);
+            }
+
+            if (strncmp(buffer, "Model name:", 11) == 0) {
+                const char *ptr = buffer + 11; // Jump past the label
+                while (*ptr && isspace((unsigned char)*ptr)) {
+                    ptr++;
+                }
+                while (*ptr && *ptr != '\n' && i < sizeof(model_name) - 1) {
+                    model_name[i++] = *ptr++;
+                }
+                model_name[i] = '\0';
+            }
+        }
+
+        pclose(fp);
+
+        if (cpu_count != -1) {
+            details.cpu_model_len = (uint8)cpu_count;
+        } else {
+            details.cpu_model_len = 1;
+        }
+
+        if (model_name[0] != '\0') {
+            strncpy(details.cpu_model, model_name, i+1);
+            details.cpu_model_len = i+1;
+        } else {
+            strcpy(details.cpu_model, "unknown");
+            details.cpu_model_len = 8;
+        }
     }
 }
 
@@ -399,18 +451,23 @@ int setup_bearssl_connection(int *fd) {
 }
 
 int send_https_request(char *req_buf, uint16 req_len, char *resp_buf, size_t resp_size) {
+    pthread_mutex_lock(&ssl_mutex);
     int fd, err = setup_bearssl_connection(&fd), ret = -6;
     int16 len = 0, r;
-    if (err)
+    if (err) {
+        pthread_mutex_unlock(&ssl_mutex);
         return err;
+    }
     if (br_sslio_write_all(&sslio_context, req_buf, req_len)) {
         br_sslio_close(&sslio_context);
         close(fd);
+        pthread_mutex_unlock(&ssl_mutex);
         return -4;
     }
     if (br_sslio_flush(&sslio_context)) {
         br_sslio_close(&sslio_context);
         close(fd);
+        pthread_mutex_unlock(&ssl_mutex);
         return -5;
     }
     while (len < (int16)(resp_size - 1) && (r = br_sslio_read(&sslio_context, resp_buf + len, resp_size - 1 - len)) > 0) {
@@ -422,6 +479,7 @@ int send_https_request(char *req_buf, uint16 req_len, char *resp_buf, size_t res
     }
     br_sslio_close(&sslio_context);
     close(fd);
+    pthread_mutex_unlock(&ssl_mutex);
     return ret;
 }
 

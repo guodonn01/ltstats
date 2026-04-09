@@ -76,6 +76,13 @@ typedef struct {
     uint64 sectors_read_total;
     uint64 sectors_written_total;
     bool public;
+    bool monthly_traffic_enabled;
+    uint8 monthly_billing_day;
+    time_t next_reset_time;
+    uint64 monthly_rx_offset;
+    uint64 monthly_tx_offset;
+    uint64 monthly_rx_total;
+    uint64 monthly_tx_total;
 } monitor_details_t;
 
 typedef struct {
@@ -83,9 +90,19 @@ typedef struct {
     char public_token[33];
     int fd;
     int latency_fd;
-    bool notification_sent[12]; // offline, cpu_usage, cpu_iowait, cpu_steal, ram_usage, swap_usage, disk_usage, net_rx_bps, net_tx_bps, disk_read_bps, disk_write_tx_bps, latency_ms
+    bool notification_sent[15]; // offline, cpu_usage, cpu_iowait, cpu_steal, ram_usage, swap_usage, disk_usage, net_rx_bps, net_tx_bps, disk_read_bps, disk_write_tx_bps, latency_ms, traffic_total, traffic_rx, traffic_tx
     json_object *name;
     json_object *monitoring_settings;
+    bool monthly_traffic_enabled;
+    uint8 monthly_billing_day;
+    time_t next_reset_time;
+    uint64 rx_total;
+    uint64 tx_total;
+    uint64 monthly_rx_offset;
+    uint64 monthly_tx_offset;
+    uint64 monthly_rx_total;
+    uint64 monthly_tx_total;
+    uint64 last_file_size;
 } notification_monitor_details_t;
 
 typedef struct {

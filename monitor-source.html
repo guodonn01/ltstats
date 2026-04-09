@@ -531,6 +531,8 @@
                     var allTime = (name, data, i, o) => `<div class="item"><div class="title">All-time ${name}</div><b>${i}</b>: <span class="value">${formatBytes(data[2])}</span><br><b>${o}</b>: <span class="value">${formatBytes(data[3])}</span></div>`, detailsHTML = '', title = `Statistics - ${data.details[0]}`, item = (title, value) => `<div class="item"><div class="title">${title}</div><span class="value">${value}</span></div>`;
                     if (data.traffic)
                         detailsHTML += allTime('traffic', data.traffic, 'RX', 'TX');
+                    if (data.monthly_traffic)
+                        detailsHTML += `<div class="item"><div class="title">Month traffic</div><b>RX</b>: <span class="value">${formatBytes(data.monthly_traffic[0])}</span><br><b>TX</b>: <span class="value">${formatBytes(data.monthly_traffic[1])}</span></div>`;
                     if (data.io)
                         detailsHTML += allTime('IO', data.io, 'Read', 'Written');
                     $('title').innerHTML = title;

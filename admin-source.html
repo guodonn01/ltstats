@@ -455,6 +455,7 @@
         }
 
         label input[type=number],
+        .grid input[type=text],
         label textarea {
             display: block;
             width: 100%
@@ -571,6 +572,11 @@
                 class="line"><input type="checkbox" id="monitor-public"> Public</label><label
                 class="line">Note:<textarea id="monitor-note" rows="3"></textarea></label><label class="line"><input
                     type="checkbox" id="monitor-note-public"> Note is public</label>
+            <label class="line"><input type="checkbox" id="monitor-monthly-traffic"
+                    onchange="$('monitor-monthly-billing-day-container').style.display = this.checked ? 'block' : 'none';">
+                Enable month traffic reset</label>
+            <label class="line" id="monitor-monthly-billing-day-container" style="display:none;">Billing start date
+                (1-31):<input type="number" id="monitor-monthly-billing-day" min="1" max="31" value="1"></label>
             <div class="line threshold-header">Monitoring thresholds:<button type="button"
                     onclick="applyDefaults();">Apply defaults</button><button type="button"
                     onclick="applyToAll();">Apply to all</button></div>
@@ -584,7 +590,10 @@
                             max="100"></label><label>Net RX (bps):<input type="number" min="1"></label><label>Net TX
                         (bps):<input type="number" min="1"></label><label>Disk Read (Bps):<input type="number"
                             min="1"></label><label>Disk Write (Bps):<input type="number" min="1"></label><label>Latency
-                        (ms):<input type="number" min="1"></label></div>
+                        (ms):<input type="number" min="1"></label><label>Total Traffic Limit:<input type="text"
+                            placeholder="e.g. 1T"></label><label>RX Traffic Limit:<input type="text"
+                            placeholder="e.g. 500G"></label><label>TX Traffic Limit:<input type="text"
+                            placeholder="e.g. 500G"></label></div>
             </div><label class="line">Additional filesystems/partitions to be monitored (space seperated, specify any
                 path within the mounted fileystem):<br><input id="monitor-additional-paths" class="seperate"></label>
             <div class="line threshold-header">Latency targets:<button type="button"
@@ -638,7 +647,7 @@
                     id="notification-sample" min="1"></label><label class="line">Command (space seperated,
                 <code>NAME</code>, <code>TYPE</code>, <code>PUBLIC_TOKEN</code> and <code>STATUS</code> will be
                 replaced, <code>TYPE</code> is one of
-                <code>{DOWN, CPU_USAGE, CPU_IOWAIT, CPU_STEAL, RAM_USAGE, SWAP_USAGE, DISK_USAGE, NET_RX, NET_TX, DISK_READ, DISK_WRITE}</code>
+                <code>{DOWN, CPU_USAGE, CPU_IOWAIT, CPU_STEAL, RAM_USAGE, SWAP_USAGE, DISK_USAGE, NET_RX, NET_TX, DISK_READ, DISK_WRITE, LATENCY, TRAFFIC_TOTAL, TRAFFIC_RX, TRAFFIC_TX}</code>
                 and <code>STILL_MET</code> is <code>TRUE</code> or <code>FALSE</code>):<textarea id="notification-exec"
                     rows="3"></textarea></label>
             <div class="line threshold-header">Default monitoring thresholds:</div>
@@ -652,7 +661,10 @@
                             max="100"></label><label>Net RX (bps):<input type="number" min="1"></label><label>Net TX
                         (bps):<input type="number" min="1"></label><label>Disk Read (Bps):<input type="number"
                             min="1"></label><label>Disk Write (Bps):<input type="number" min="1"></label><label>Latency
-                        (ms):<input type="number" min="1"></label></div>
+                        (ms):<input type="number" min="1"></label><label>Total Traffic Limit:<input type="text"
+                            placeholder="e.g. 1T"></label><label>RX Traffic Limit:<input type="text"
+                            placeholder="e.g. 500G"></label><label>TX Traffic Limit:<input type="text"
+                            placeholder="e.g. 500G"></label></div>
             </div>
             <div class="line"><button onclick="saveNotifications();">Save</button><button
                     onclick="closeModals();">Cancel</button></div>
@@ -670,6 +682,27 @@
         </div>
     </div>
     <script>
+        function parseBytesAdmin(str) {
+            if (!str) return 0;
+            var match = str.toString().trim().match(/^([\d.]+)\s*([kMGT]?)B?$/i);
+            if (!match) return parseInt(str, 10) || 0;
+            var val = parseFloat(match[1]);
+            var unit = match[2].toUpperCase();
+            if (unit === 'K') val *= 1024;
+            else if (unit === 'M') val *= 1024 * 1024;
+            else if (unit === 'G') val *= 1024 * 1024 * 1024;
+            else if (unit === 'T') val *= 1024 * 1024 * 1024 * 1024;
+            return Math.floor(val);
+        }
+        function formatBytesAdmin(bytes) {
+            if (!bytes) return '';
+            var sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+            if (bytes == 0) return '0 B';
+            var i = parseInt(Math.floor(Math.log(bytes) / Math.log(1024)));
+            if (i === 0) return bytes + ' ' + sizes[i];
+            return (bytes / Math.pow(1024, i)).toFixed(2).replace(/\.00$/, '') + ' ' + sizes[i];
+        }
+
         var data, original, editing;
 
         var $ = id => document.getElementById(id);
@@ -834,11 +867,14 @@
         function editMonitor(token = null) {
             editing = token;
             $('monitor-modal').querySelector('h2').textContent = token ? 'Edit monitor' : 'Add monitor';
-            $('monitor-modal').querySelectorAll('.grid input[type=number],#monitor-note,#monitor-name').forEach(input => input.value = '');
+            $('monitor-modal').querySelectorAll('.grid input,#monitor-note,#monitor-name').forEach(input => input.value = '');
             $('monitor-public').checked = true;
             $('monitor-note-public').checked = false;
             $('monitor-additional-paths').value = '';
             $('latency-monitors-list').innerHTML = '';
+            $('monitor-monthly-traffic').checked = false;
+            $('monitor-monthly-billing-day').value = 1;
+            $('monitor-monthly-billing-day-container').style.display = 'none';
             if (token) {
                 var m = data.monitors[token];
                 $('monitor-name').value = m[1];
@@ -851,10 +887,18 @@
                     $('monitor-note-public').checked = false;
                 }
                 if (m[4])
-                    $('monitor-modal').querySelectorAll('.grid input[type=number]').forEach((element, index) => element.value = m[4][index] !== undefined ? m[4][index] : '');
+                    $('monitor-modal').querySelectorAll('.grid input').forEach((element, index) => {
+                        var val = m[4][index] !== undefined && m[4][index] !== false ? m[4][index] : '';
+                        element.value = element.type === 'text' && val !== '' ? formatBytesAdmin(val) : val;
+                    });
                 $('monitor-additional-paths').value = m[5] ? m[5].join(' ') : '';
                 if (m[6] && Array.isArray(m[6])) {
                     m[6].forEach(lm => addLatencyMonitor(lm.id, lm.type, lm.target, lm.port, lm.name));
+                }
+                if (m[7] && typeof m[7] === 'object') {
+                    $('monitor-monthly-traffic').checked = m[7].enabled;
+                    $('monitor-monthly-billing-day').value = m[7].billing_day || 1;
+                    $('monitor-monthly-billing-day-container').style.display = m[7].enabled ? 'block' : 'none';
                 }
             } else
                 applyDefaults();
@@ -863,7 +907,13 @@
 
         function parseGrid(id) {
             var d = [];
-            $(id).querySelectorAll('.grid input[type=number]').forEach((e, i) => d[i] = parseInt(e.value) === 0 ? 0 : (parseInt(e.value) || false));
+            $(id).querySelectorAll('.grid input').forEach((e, i) => {
+                if (e.type === 'text') {
+                    d[i] = parseBytesAdmin(e.value) || false;
+                } else {
+                    d[i] = parseInt(e.value) === 0 ? 0 : (parseInt(e.value) || false);
+                }
+            });
             return d.some(v => v !== false) ? d : false;
         }
 
@@ -894,6 +944,10 @@
                 });
             });
             monitor[6] = lm;
+            monitor[7] = {
+                enabled: $('monitor-monthly-traffic').checked,
+                billing_day: parseInt($('monitor-monthly-billing-day').value, 10) || 1
+            };
             data.monitors[token] = monitor;
             possiblyChanged();
             closeModals();
@@ -938,7 +992,10 @@
         function applyDefaults() {
             if (!data.notifications.default)
                 return;
-            $('monitor-modal').querySelectorAll('.grid input[type=number]').forEach((element, index) => element.value = data.notifications.default[index] !== undefined ? data.notifications.default[index] : '');
+            $('monitor-modal').querySelectorAll('.grid input').forEach((element, index) => {
+                var val = data.notifications.default[index] !== undefined && data.notifications.default[index] !== false ? data.notifications.default[index] : '';
+                element.value = element.type === 'text' && val !== '' ? formatBytesAdmin(val) : val;
+            });
         }
 
         function applyToAll() {
@@ -1061,7 +1118,10 @@
             $('notification-sample').value = n.sample;
             $('notification-exec').value = n.exec.join(' ');
             if (n.default)
-                $('notification-settings-modal').querySelectorAll('.grid input[type=number]').forEach((element, index) => element.value = n.default[index]);
+                $('notification-settings-modal').querySelectorAll('.grid input').forEach((element, index) => {
+                    var val = n.default[index] !== undefined && n.default[index] !== false ? n.default[index] : '';
+                    element.value = element.type === 'text' && val !== '' ? formatBytesAdmin(val) : val;
+                });
             $('notification-settings-modal').classList.remove('hidden');
         }
 

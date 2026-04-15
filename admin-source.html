@@ -575,6 +575,18 @@
             <label class="line"><input type="checkbox" id="monitor-monthly-traffic"
                     onchange="$('monitor-monthly-billing-day-container').style.display = this.checked ? 'block' : 'none';">
                 Enable month traffic reset</label>
+            <label class="line">Billing Cycle:
+                <select id="monitor-billing-cycle"
+                    onchange="$('monitor-expire-date-container').style.display = this.value == 0 ? 'none' : 'block';">
+                    <option value="0">Free</option>
+                    <option value="1">Monthly</option>
+                    <option value="3">Quarterly</option>
+                    <option value="4">Semi-Annually</option>
+                    <option value="2">Yearly</option>
+                </select>
+            </label>
+            <label class="line" id="monitor-expire-date-container" style="display:none;">Next Billing Date:<input
+                    type="date" id="monitor-expire-date" style="margin-left: 5px;"></label>
             <label class="line" id="monitor-monthly-billing-day-container" style="display:none;">Billing start date
                 (1-31):<input type="number" id="monitor-monthly-billing-day" min="1" max="31" value="1"></label>
             <div class="line threshold-header">Monitoring thresholds:<button type="button"
@@ -645,9 +657,9 @@
             </div><label class="line">Check every (seconds):<input type="number" id="notification-every"
                     min="1"></label><label class="line">Sample period (minutes):<input type="number"
                     id="notification-sample" min="1"></label><label class="line">Command (space seperated,
-                <code>NAME</code>, <code>TYPE</code>, <code>PUBLIC_TOKEN</code> and <code>STATUS</code> will be
+                <code>NAME</code>, <code>TYPE</code>, <code>PUBLIC_TOKEN</code> and <code>VALUE</code> will be
                 replaced, <code>TYPE</code> is one of
-                <code>{DOWN, CPU_USAGE, CPU_IOWAIT, CPU_STEAL, RAM_USAGE, SWAP_USAGE, DISK_USAGE, NET_RX, NET_TX, DISK_READ, DISK_WRITE, LATENCY, TRAFFIC_TOTAL, TRAFFIC_RX, TRAFFIC_TX}</code>
+                <code>{DOWN, CPU_USAGE, CPU_IOWAIT, CPU_STEAL, RAM_USAGE, SWAP_USAGE, DISK_USAGE, NET_RX, NET_TX, DISK_READ, DISK_WRITE, LATENCY, TRAFFIC_TOTAL, TRAFFIC_RX, TRAFFIC_TX, EXPIRE}</code>
                 and <code>STILL_MET</code> is <code>TRUE</code> or <code>FALSE</code>):<textarea id="notification-exec"
                     rows="3"></textarea></label>
             <div class="line threshold-header">Default monitoring thresholds:</div>
@@ -875,6 +887,9 @@
             $('monitor-monthly-traffic').checked = false;
             $('monitor-monthly-billing-day').value = 1;
             $('monitor-monthly-billing-day-container').style.display = 'none';
+            $('monitor-billing-cycle').value = 0;
+            $('monitor-expire-date').value = '';
+            $('monitor-expire-date-container').style.display = 'none';
             if (token) {
                 var m = data.monitors[token];
                 $('monitor-name').value = m[1];
@@ -899,6 +914,15 @@
                     $('monitor-monthly-traffic').checked = m[7].enabled;
                     $('monitor-monthly-billing-day').value = m[7].billing_day || 1;
                     $('monitor-monthly-billing-day-container').style.display = m[7].enabled ? 'block' : 'none';
+                }
+                if (m[8] && typeof m[8] === 'object') {
+                    $('monitor-billing-cycle').value = m[8].cycle || 0;
+                    if (m[8].date) {
+                        $('monitor-expire-date').value = new Date(m[8].date * 1000).toISOString().split('T')[0];
+                    } else {
+                        $('monitor-expire-date').value = '';
+                    }
+                    $('monitor-expire-date-container').style.display = m[8].cycle == 0 ? 'none' : 'block';
                 }
             } else
                 applyDefaults();
@@ -947,6 +971,12 @@
             monitor[7] = {
                 enabled: $('monitor-monthly-traffic').checked,
                 billing_day: parseInt($('monitor-monthly-billing-day').value, 10) || 1
+            };
+            var cycle = parseInt($('monitor-billing-cycle').value, 10) || 0;
+            var expireDate = $('monitor-expire-date').value;
+            monitor[8] = {
+                cycle: cycle,
+                date: expireDate ? Math.floor(new Date(expireDate).getTime() / 1000) : 0
             };
             data.monitors[token] = monitor;
             possiblyChanged();

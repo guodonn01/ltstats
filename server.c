@@ -106,14 +106,24 @@ json_object *load_json_file(char *name) {
 time_t get_next_reset_time(uint8 billing_day, time_t from_time) {
     struct tm tm_info;
     gmtime_r(&from_time, &tm_info);
-    if (tm_info.tm_mday >= billing_day) {
+    uint8 days_in_mon[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    if ((tm_info.tm_year + 1900) % 4 == 0 && ((tm_info.tm_year + 1900) % 100 != 0 || (tm_info.tm_year + 1900) % 400 == 0)) {
+        days_in_mon[1] = 29;
+    }
+    uint8 current_target = billing_day > days_in_mon[tm_info.tm_mon] ? days_in_mon[tm_info.tm_mon] : billing_day;
+    if (tm_info.tm_mday >= current_target) {
         tm_info.tm_mon += 1;
         if (tm_info.tm_mon > 11) {
             tm_info.tm_mon = 0;
             tm_info.tm_year += 1;
         }
+        if ((tm_info.tm_year + 1900) % 4 == 0 && ((tm_info.tm_year + 1900) % 100 != 0 || (tm_info.tm_year + 1900) % 400 == 0)) {
+            days_in_mon[1] = 29;
+        } else {
+            days_in_mon[1] = 28;
+        }
     }
-    tm_info.tm_mday = billing_day;
+    tm_info.tm_mday = billing_day > days_in_mon[tm_info.tm_mon] ? days_in_mon[tm_info.tm_mon] : billing_day;
     tm_info.tm_hour = 0;
     tm_info.tm_min = 0;
     tm_info.tm_sec = 0;
@@ -126,30 +136,48 @@ void load_totals(monitor_details_t *monitor) {
     monitor->monthly_rx_offset = monitor->monthly_tx_offset = 0;
     monitor->next_reset_time = 0;
 
-    uint32 file_len = fd_size(monitor->fd), pos = 0;
+    uint32 file_len = fd_size(monitor->fd);
+    uint32 aligned_file_len = file_len - (file_len % sizeof(stats_t));
+    uint32 pos = 0;
     int32 read_len;
     if (!file_len) // problematic in case fstat failed, but not much else to do here...
         return;
-    stats_t buf[256];
-    while (pos < file_len && (read_len = pread(monitor->fd, buf, min(sizeof(buf), file_len - pos), pos)) > 0) {
-        uint16 count = read_len / sizeof(stats_t);
+        
+    uint32 buf_items = 4096;
+    stats_t *buf = malloc(buf_items * sizeof(stats_t));
+    if (!buf)
+        return;
+        
+    while (pos < aligned_file_len && (read_len = pread(monitor->fd, buf, min(buf_items * sizeof(stats_t), aligned_file_len - pos), pos)) > 0) {
+        uint32 count = read_len / sizeof(stats_t);
+        if (!count) break;
         pos += count * sizeof(stats_t);
-        for (uint16 i = 0; i < count; ++i) {
-            stats_t *element = &buf[i];
-            if (monitor->monthly_traffic_enabled) {
+        
+        if (monitor->monthly_traffic_enabled) {
+            for (uint32 i = 0; i < count; ++i) {
+                stats_t *element = &buf[i];
                 if (monitor->next_reset_time == 0 || element->time >= monitor->next_reset_time) {
                     monitor->next_reset_time = get_next_reset_time(monitor->monthly_billing_day, element->time);
                     monitor->monthly_rx_offset = monitor->rx_total;
                     monitor->monthly_tx_offset = monitor->tx_total;
                 }
+                monitor->rx_total += element->rx_bytes;
+                monitor->tx_total += element->tx_bytes;
+                monitor->sectors_read_total += element->read_sectors;
+                monitor->sectors_written_total += element->written_sectors;
             }
-
-            monitor->rx_total += element->rx_bytes;
-            monitor->tx_total += element->tx_bytes;
-            monitor->sectors_read_total += element->read_sectors;
-            monitor->sectors_written_total += element->written_sectors;
+        } else {
+            for (uint32 i = 0; i < count; ++i) {
+                stats_t *element = &buf[i];
+                monitor->rx_total += element->rx_bytes;
+                monitor->tx_total += element->tx_bytes;
+                monitor->sectors_read_total += element->read_sectors;
+                monitor->sectors_written_total += element->written_sectors;
+            }
         }
     }
+    free(buf);
+
     if (monitor->monthly_traffic_enabled) {
         monitor->monthly_rx_total = monitor->rx_total - monitor->monthly_rx_offset;
         monitor->monthly_tx_total = monitor->tx_total - monitor->monthly_tx_offset;
@@ -219,6 +247,17 @@ bool parse_data_json(void) {
                     }
                 }
                 
+                new_details[current_details_pos].billing_cycle = 0;
+                new_details[current_details_pos].expire_date = 0;
+                json_object *billing_obj;
+                if (json_object_array_length(val) > 8 && (billing_obj = json_object_array_get_idx(val, 8)) && json_object_is_type(billing_obj, json_type_object)) {
+                    json_object *cycle_obj, *date_obj;
+                    if (json_object_object_get_ex(billing_obj, "cycle", &cycle_obj) && json_object_is_type(cycle_obj, json_type_int))
+                        new_details[current_details_pos].billing_cycle = json_object_get_int(cycle_obj);
+                    if (json_object_object_get_ex(billing_obj, "date", &date_obj) && (json_object_is_type(date_obj, json_type_int) || json_object_is_type(date_obj, json_type_double)))
+                        new_details[current_details_pos].expire_date = json_object_get_uint64(date_obj);
+                }
+                
                 notification_monitor_details_t *tmp_monitor;
                 if ((tmp_monitor = get_notification_monitor_details_by_private(token_str))) {
                     new_details[current_details_pos].fd = tmp_monitor->fd;
@@ -246,6 +285,16 @@ bool parse_data_json(void) {
                     new_details[current_details_pos].monthly_rx_total = 0;
                     new_details[current_details_pos].monthly_tx_total = 0;
                     new_details[current_details_pos].last_file_size = 0;
+                }
+                
+                json_object *notif_sent_obj;
+                if (json_object_array_length(val) > 9 && (notif_sent_obj = json_object_array_get_idx(val, 9)) && json_object_is_type(notif_sent_obj, json_type_array)) {
+                    for (uint8 j = 0; j < 16 && j < json_object_array_length(notif_sent_obj); ++j) {
+                        json_object *el = json_object_array_get_idx(notif_sent_obj, j);
+                        if (el && (json_object_is_type(el, json_type_int) || json_object_is_type(el, json_type_double))) {
+                            new_details[current_details_pos].notification_sent[j] = json_object_get_uint64(el);
+                        }
+                    }
                 }
         MONITORS_FOREACH_END
         if (notification_details) {
@@ -578,9 +627,95 @@ JSON format of data.json (PUBLIC_TOKEN and private_token should be unique and ra
   copy: string, TOKEN will be replaced with the actual token
 */
 
+void save_monitor_state_to_json(const char *public_token, uint32 *notification_sent, uint64 expire_date) {
+    uint32 expected, now_sec;
+    for (;;) {
+        expected = 0;
+        now_sec = time(NULL);
+        if (__atomic_compare_exchange_n(admin_proc, &expected, now_sec, false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+            break;
+        if (expected > 0 && now_sec >= expected + 15) {
+            if (__atomic_compare_exchange_n(admin_proc, &expected, now_sec, false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+                break;
+        }
+        usleep(10000);
+    }
+    
+    json_object *fresh_data_json = load_json_file("data.json");
+    if (!fresh_data_json) {
+        __atomic_store_n(admin_proc, 0, __ATOMIC_RELEASE);
+        return;
+    }
+
+    json_object *fresh_monitors, *monitor_arr;
+    if (json_object_object_get_ex(fresh_data_json, "monitors", &fresh_monitors) && json_object_is_type(fresh_monitors, json_type_object) && json_object_object_get_ex(fresh_monitors, public_token, &monitor_arr) && json_object_is_type(monitor_arr, json_type_array)) {
+        json_object *billing_obj = NULL;
+        if (json_object_array_length(monitor_arr) > 8) {
+            billing_obj = json_object_array_get_idx(monitor_arr, 8);
+        }
+        if (billing_obj && json_object_is_type(billing_obj, json_type_object)) {
+            json_object *date_obj;
+            if (json_object_object_get_ex(billing_obj, "date", &date_obj)) {
+                json_object_set_uint64(date_obj, expire_date);
+            } else {
+                json_object_object_add(billing_obj, "date", json_object_new_uint64(expire_date));
+            }
+        }
+        
+        json_object *notif_sent_obj = NULL;
+        uint32 len = json_object_array_length(monitor_arr);
+        if (len > 9) {
+            notif_sent_obj = json_object_array_get_idx(monitor_arr, 9);
+        } else {
+            while (json_object_array_length(monitor_arr) < 9) {
+                json_object_array_add(monitor_arr, NULL);
+            }
+        }
+        if (!notif_sent_obj || !json_object_is_type(notif_sent_obj, json_type_array)) {
+            notif_sent_obj = json_object_new_array();
+            if (json_object_array_length(monitor_arr) == 9) {
+                json_object_array_add(monitor_arr, notif_sent_obj);
+            } else {
+                json_object_array_put_idx(monitor_arr, 9, notif_sent_obj);
+            }
+        }
+        for (uint8 j = 0; j < 16; ++j) {
+            json_object *val_obj = json_object_new_uint64(notification_sent[j]);
+            if (json_object_array_length(notif_sent_obj) <= j) {
+                json_object_array_add(notif_sent_obj, val_obj);
+            } else {
+                json_object_array_put_idx(notif_sent_obj, j, val_obj);
+            }
+        }
+        
+        json_object *time_obj;
+        if (json_object_object_get_ex(fresh_data_json, "time", &time_obj)) {
+            json_object_set_uint64(time_obj, time(NULL));
+        }
+        
+        size_t json_len, written = 0;
+        const char *json_str = json_object_to_json_string_length(fresh_data_json, JSON_C_TO_STRING_PLAIN, &json_len);
+        int fd = open("data.json.notif.new", O_WRONLY | O_TRUNC | O_CREAT, S_IRUSR | S_IWUSR);
+        if (fd != -1) {
+            int tmp;
+            while (written < json_len && (tmp = write(fd, json_str + written, json_len - written)) > 0)
+                written += tmp;
+            close(fd);
+            if (written == json_len) {
+                rename("data.json.notif.new", "data.json");
+                __atomic_store_n(data_json_changed, true, __ATOMIC_RELAXED);
+            }
+        }
+    }
+    json_object_put(fresh_data_json);
+    __atomic_store_n(admin_proc, 0, __ATOMIC_RELEASE);
+}
+
 extern char **environ;
-void notify(json_object *exec, json_object *name, char *public_token, char *type, bool still_met) {
+void notify(json_object *exec, json_object *name, char *public_token, char *type, bool still_met, uint64 value) {
     if (!fork()) {
+        char value_str[32];
+        snprintf(value_str, sizeof(value_str), "%llu", (unsigned long long)value);
         uint16 len = json_object_array_length(exec);
         char *args[len + 1];
         args[len] = NULL;
@@ -601,6 +736,8 @@ void notify(json_object *exec, json_object *name, char *public_token, char *type
                 arg = public_token;
             else if (len == strlen("STILL_MET") && !memcmp(str, SLEN("STILL_MET")))
                 arg = still_met ? "TRUE" : "FALSE";
+            else if (len == strlen("VALUE") && !memcmp(str, SLEN("VALUE")))
+                arg = value_str;
             if (!arg) {
                 arg = strdup(str); // because const shouldn't be casted away
                 if (!arg)
@@ -638,32 +775,72 @@ start:
         }
         uint32 time_start = time(NULL);
         for (uint32 i = 0; i < details_count; ++i) {
+            bool notif_changed = false;
             notification_monitor_details_t *details = &notification_details[i];
                 if (!json_object_is_type(details->monitoring_settings, json_type_array))
                 continue;
             struct stat data;
             if (fstat(details->fd, &data) == -1 || data.st_mtim.tv_sec <= 0 || data.st_size <= 0)
                 continue;
+            uint64 file_size_aligned = data.st_size - (data.st_size % sizeof(stats_t));
             uint32 now = time(NULL);
             if (now < data.st_mtim.tv_sec)
                 continue;
             uint32 last_data_seconds = now - data.st_mtim.tv_sec;
-            if (last_data_seconds > DECLARE_DOWN_IF_N_SECONDS_WITHOUT_DATA) { // down
+            if (last_data_seconds > DECLARE_DOWN_IF_N_SECONDS_WITHOUT_DATA) {
                 json_object *element = json_object_array_get_idx(details->monitoring_settings, 0);
-                if (!element || !json_object_is_type(element, json_type_int))
+                if (!element || !json_object_is_type(element, json_type_int)) {
                     continue;
+                }
                 uint64 minutes = json_object_get_uint64(element);
-                if ((last_data_seconds - 60) >= (minutes * 60) && !details->notification_sent[0]) {
-                    details->notification_sent[0] = true;
-                    notify(exec, details->name, details->public_token, "DOWN", true);
+                if (last_data_seconds >= (minutes * 60 + 60) && !details->notification_sent[0]) {
+                    details->notification_sent[0] = 1;
+                    notify(exec, details->name, details->public_token, "DOWN", true, last_data_seconds);
+                    save_monitor_state_to_json(details->public_token, details->notification_sent, details->expire_date);
                 }
                 continue;
             }
             if (details->notification_sent[0]) {
-                details->notification_sent[0] = false;
-                notify(exec, details->name, details->public_token, "DOWN", false);
+                details->notification_sent[0] = 0;
+                notify(exec, details->name, details->public_token, "DOWN", false, last_data_seconds);
+                notif_changed = true;
             }
             
+            if (details->billing_cycle > 0 && details->expire_date > 0) {
+                if (now >= details->expire_date && last_data_seconds <= DECLARE_DOWN_IF_N_SECONDS_WITHOUT_DATA) {
+                    while (details->expire_date <= now) {
+                        struct tm tm_info;
+                        time_t exp = details->expire_date;
+                        gmtime_r(&exp, &tm_info);
+                        tm_info.tm_mon += details->billing_cycle;
+                        tm_info.tm_year += tm_info.tm_mon / 12;
+                        tm_info.tm_mon %= 12;
+                        details->expire_date = timegm(&tm_info);
+                    }
+                    if (details->notification_sent[15]) {
+                        details->notification_sent[15] = 0;
+                        notify(exec, details->name, details->public_token, "EXPIRE", false, details->expire_date);
+                    }
+                    notif_changed = true;
+                } else if (now >= details->expire_date - 2 * 86400) {
+                    if (now - details->notification_sent[15] >= 86400) {
+                        details->notification_sent[15] = now;
+                        notify(exec, details->name, details->public_token, "EXPIRE", true, details->expire_date);
+                        notif_changed = true;
+                    }
+                } else {
+                    if (details->notification_sent[15]) {
+                        details->notification_sent[15] = 0;
+                        notify(exec, details->name, details->public_token, "EXPIRE", false, details->expire_date);
+                        notif_changed = true;
+                    }
+                }
+            } else if (details->notification_sent[15]) {
+                details->notification_sent[15] = 0;
+                notify(exec, details->name, details->public_token, "EXPIRE", false, details->expire_date);
+                notif_changed = true;
+            }
+
             if (details->monthly_traffic_enabled) {
                 if (details->last_file_size > (uint64)data.st_size) {
                     details->last_file_size = 0;
@@ -675,27 +852,32 @@ start:
                 }
                 uint64 read_pos = details->last_file_size;
                 int32 read_len;
-                stats_t buf[256];
-                while (read_pos < (uint64)data.st_size && (read_len = pread(details->fd, buf, min((uint64)sizeof(buf), (uint64)(data.st_size - read_pos)), read_pos)) > 0) {
-                    uint16 count = read_len / sizeof(stats_t);
-                    read_pos += count * sizeof(stats_t);
-                    for (uint16 j = 0; j < count; ++j) {
-                        stats_t *element = &buf[j];
-                        if (details->next_reset_time == 0 || element->time >= details->next_reset_time) {
-                            details->next_reset_time = get_next_reset_time(details->monthly_billing_day, element->time);
-                            details->monthly_rx_offset = details->rx_total;
-                            details->monthly_tx_offset = details->tx_total;
+                uint32 buf_items = 4096;
+                stats_t *buf = malloc(buf_items * sizeof(stats_t));
+                if (buf) {
+                    while (read_pos < file_size_aligned && (read_len = pread(details->fd, buf, min((uint64)(buf_items * sizeof(stats_t)), (uint64)(file_size_aligned - read_pos)), read_pos)) > 0) {
+                        uint32 count = read_len / sizeof(stats_t);
+                        if (!count) break;
+                        read_pos += count * sizeof(stats_t);
+                        for (uint32 j = 0; j < count; ++j) {
+                            stats_t *element = &buf[j];
+                            if (details->next_reset_time == 0 || element->time >= details->next_reset_time) {
+                                details->next_reset_time = get_next_reset_time(details->monthly_billing_day, element->time);
+                                details->monthly_rx_offset = details->rx_total;
+                                details->monthly_tx_offset = details->tx_total;
+                            }
+                            details->rx_total += element->rx_bytes;
+                            details->tx_total += element->tx_bytes;
                         }
-                        details->rx_total += element->rx_bytes;
-                        details->tx_total += element->tx_bytes;
                     }
+                    free(buf);
                 }
                 details->last_file_size = read_pos;
                 details->monthly_rx_total = details->rx_total - details->monthly_rx_offset;
                 details->monthly_tx_total = details->tx_total - details->monthly_tx_offset;
             }
 
-            int64 pos = data.st_size - (sample_count * sizeof(stats_t));
+            int64 pos = file_size_aligned - (sample_count * sizeof(stats_t));
             if (pos < 0)
                 pos = 0;
             double double_totals[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
@@ -703,9 +885,10 @@ start:
             uint32 total_count = 0, count;
             int32 read_len;
             uint32 last_time = 0;
-                uint64 averages[14];
-            while (pos < data.st_size && (read_len = pread(details->fd, http_buf, min(sizeof(stats_t) * (sizeof(http_buf) / sizeof(stats_t)), (uint64)(data.st_size - pos)), pos)) > 0) {
+            uint64 averages[14];
+            while ((uint64)pos < file_size_aligned && (read_len = pread(details->fd, http_buf, min(sizeof(stats_t) * (sizeof(http_buf) / sizeof(stats_t)), (uint64)(file_size_aligned - pos)), pos)) > 0) {
                 count = read_len / sizeof(stats_t);
+                if (!count) break;
                 pos += count * sizeof(stats_t);
                 total_count += count;
                 for (uint16 i = 0; i < count; ++i) {
@@ -794,9 +977,9 @@ start:
                 averages[10] = avg_lat > 0 ? avg_lat : 0;
 
             if (details->monthly_traffic_enabled) {
-                averages[11] = (details->monthly_rx_total + details->monthly_tx_total) * 10 / 9;
-                averages[12] = details->monthly_rx_total * 10 / 9;
-                averages[13] = details->monthly_tx_total * 10 / 9;
+                averages[11] = details->monthly_rx_total + details->monthly_tx_total;
+                averages[12] = details->monthly_rx_total;
+                averages[13] = details->monthly_tx_total;
             } else {
                 averages[11] = 0;
                 averages[12] = 0;
@@ -807,20 +990,32 @@ start:
                     "CPU_USAGE", "CPU_IOWAIT", "CPU_STEAL", "RAM_USAGE", "SWAP_USAGE", "DISK_USAGE", "NET_RX", "NET_TX", "DISK_READ", "DISK_WRITE", "LATENCY", "TRAFFIC_TOTAL", "TRAFFIC_RX", "TRAFFIC_TX"
             };
             uint8 num_settings = json_object_array_length(details->monitoring_settings);
-            for (uint8 y = 1; y < num_settings && y < sizeof(details->notification_sent); ++y) {
+            for (uint8 y = 1; y < num_settings && y < sizeof(details->notification_sent) / sizeof(details->notification_sent[0]) - 1; ++y) {
                 json_object *element = json_object_array_get_idx(details->monitoring_settings, y);
-                uint64 threshold;
-                if (!element || !json_object_is_type(element, json_type_int) || !(threshold = json_object_get_uint64(element)))
+                if (!element || !json_object_is_type(element, json_type_int))
                     continue;
-                if (averages[y - 1] >= threshold) {
+                uint64 threshold = json_object_get_uint64(element);
+            
+            uint64 compare_value = averages[y - 1];
+            if (y - 1 >= 11 && y - 1 <= 13) {
+                compare_value = compare_value * 10 / 9;
+            }
+
+            if (compare_value >= threshold) {
                     if (!details->notification_sent[y]) {
-                        details->notification_sent[y] = true;
-                        notify(exec, details->name, details->public_token, types[y - 1], true);
+                        details->notification_sent[y] = 1;
+                        notify(exec, details->name, details->public_token, types[y - 1], true, averages[y - 1]);
+                        notif_changed = true;
                     }
                 } else if (details->notification_sent[y]) {
-                    details->notification_sent[y] = false;
-                    notify(exec, details->name, details->public_token, types[y - 1], false);
+                    details->notification_sent[y] = 0;
+                    notify(exec, details->name, details->public_token, types[y - 1], false, averages[y - 1]);
+                    notif_changed = true;
                 }
+            }
+            
+            if (notif_changed) {
+                save_monitor_state_to_json(details->public_token, details->notification_sent, details->expire_date);
             }
         }
         int status;
@@ -853,16 +1048,20 @@ int main(int argc, char **argv) {
     if (monitoring_reload == MAP_FAILED)
         return 2;
     __atomic_store_n(monitoring_reload, (uint32)0, __ATOMIC_RELAXED);
+    
+    data_json_changed = (void *)((uint8 *)monitoring_reload + CACHELINE);
+    admin_proc = (void *)((uint8 *)monitoring_reload + CACHELINE + CACHELINE);
+    __atomic_store_n(data_json_changed, false, __ATOMIC_RELAXED);
+    __atomic_store_n(admin_proc, 0, __ATOMIC_RELAXED);
+    
+    json_c_set_serialization_double_format("%.2f", JSON_C_OPTION_GLOBAL);
+
     int pid = fork();
     if (pid == -1)
         return 3;
     if (!pid)
         notifications_proc();
     proc = PROC_WEB;
-    data_json_changed = (void *)((uint8 *)monitoring_reload + CACHELINE);
-    admin_proc = (void *)((uint8 *)monitoring_reload + CACHELINE + CACHELINE);
-    __atomic_store_n(data_json_changed, false, __ATOMIC_RELAXED);
-    __atomic_store_n(admin_proc, false, __ATOMIC_RELAXED);
     struct sigaction sa;
     sa.sa_handler = (sighandler_t)sigchld_handler;
     sigemptyset(&sa.sa_mask);
@@ -896,7 +1095,6 @@ int main(int argc, char **argv) {
     monitor_page_fd = open_with_retries("monitor.html", O_RDONLY);
     admin_page_fd = open_with_retries("admin.html", O_RDONLY);
     favicon_ico_fd = open("favicon.ico", O_RDONLY);
-    json_c_set_serialization_double_format("%.2f", JSON_C_OPTION_GLOBAL);
     for (;;) {
         if (close_fds_count)
             check_close_fds();
@@ -944,7 +1142,7 @@ int main(int argc, char **argv) {
             }
         }
         if (http_buf_compare("POST /", "submit")) {
-            if ((uint32)len < body + sizeof(net_header_t) + sizeof(details_t))
+            if ((uint32)len < body + sizeof(net_header_t))
                 goto cont;
             ptr_header = (net_header_t *)(http_buf + body);
             for (uint8 i = 0; i < 32; ++i)
@@ -954,6 +1152,8 @@ int main(int argc, char **argv) {
             if (ptr_header->token[32] || !(monitor = get_monitor_details_by_private(ptr_header->token)))
                 goto cont;
             if (ptr_header->version == 1) {
+                if (ptr_header->stats_count == 0)
+                    goto cont;
                 expected_len = sizeof(net_header_t);
                 if (ptr_header->includes_details)
                     expected_len += sizeof(details_t);
@@ -1106,32 +1306,46 @@ admin:
                     ++id;
                 __atomic_store_n(monitoring_reload, id, __ATOMIC_RELAXED);
             }
-            if (!is_logged_in() || __atomic_load_n(admin_proc, __ATOMIC_RELAXED))
+        if (!is_logged_in())
+            goto cont;
+        uint32 expected = 0;
+        uint32 now_sec = time(NULL);
+        if (!__atomic_compare_exchange_n(admin_proc, &expected, now_sec, false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+            if (expected > 0 && now_sec >= expected + 15) {
+                if (!__atomic_compare_exchange_n(admin_proc, &expected, now_sec, false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+                    goto cont;
+            } else
                 goto cont;
-            __atomic_store_n(admin_proc, true, __ATOMIC_RELAXED); // no CAS needed because if no admin process is running, this variable won't be modified from anywhere else
+        }
             admin = true;
         } else
             goto cont;
 fork:
-        if (__atomic_load_n(&children, __ATOMIC_RELAXED) >= max_children)
+        if (__atomic_load_n(&children, __ATOMIC_RELAXED) >= max_children) {
+            if (admin == true)
+                __atomic_store_n(admin_proc, 0, __ATOMIC_RELEASE);
             goto cont;
+        }
         if ((pid = syscall(__NR_clone, CLONE_FILES | SIGCHLD, 0, 0, 0, 0)) > 0) {
             __atomic_add_fetch(&children, 1, __ATOMIC_RELAXED);
             continue;
         } else {
             if (!pid) {
+                struct itimerval timer = { .it_value = { .tv_sec = 10, .tv_usec = 0 }, .it_interval = { .tv_sec = 0, .tv_usec = 0 } }; // terminate after 10 seconds to ensure fds aren't used anymore (and it doesn't make much sense to run longer as the HTTP request will likely have timeouted by then)
+                if (setitimer(ITIMER_REAL, &timer, NULL) == -1) {
+                    if (admin == true)
+                        __atomic_store_n(admin_proc, 0, __ATOMIC_RELEASE);
+                    return 1;
+                }
+                signal(SIGALRM, (sighandler_t)sigalrm_handler);
                 if (!admin) { // the fds in details cannot be closed while the admin process is doing work as only the admin process can cause a re-load of data.json and therefore a closing of them; other children MAY NOT use ANY syscalls causing fds to be allocated as they may terminate before they can close them.
-                    struct itimerval timer = { .it_value = { .tv_sec = 10, .tv_usec = 0 }, .it_interval = { .tv_sec = 0, .tv_usec = 0 } }; // terminate after 10 seconds to ensure fds aren't used anymore (and it doesn't make much sense to run longer as the HTTP request will likely have timeouted by then)
-                    if (setitimer(ITIMER_REAL, &timer, NULL) == -1)
-                        return 1;
-                    signal(SIGALRM, (sighandler_t)sigalrm_handler);
                     process_request();
                 } else
                     admin_process_request(admin);
                 close(client);
                 _exit(0); // don't clean up
-            } else if (admin) // pid < 0 => fork failed
-                __atomic_store_n(admin_proc, false, __ATOMIC_RELAXED);
+            } else if (admin == true) // pid < 0 => fork failed
+                __atomic_store_n(admin_proc, 0, __ATOMIC_RELEASE);
         }
 cont:
         close(client);

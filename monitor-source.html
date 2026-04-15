@@ -531,8 +531,23 @@
                     var allTime = (name, data, i, o) => `<div class="item"><div class="title">All-time ${name}</div><b>${i}</b>: <span class="value">${formatBytes(data[2])}</span><br><b>${o}</b>: <span class="value">${formatBytes(data[3])}</span></div>`, detailsHTML = '', title = `Statistics - ${data.details[0]}`, item = (title, value) => `<div class="item"><div class="title">${title}</div><span class="value">${value}</span></div>`;
                     if (data.traffic)
                         detailsHTML += allTime('traffic', data.traffic, 'RX', 'TX');
-                    if (data.monthly_traffic)
-                        detailsHTML += `<div class="item"><div class="title">Month traffic</div><b>RX</b>: <span class="value">${formatBytes(data.monthly_traffic[0])}</span><br><b>TX</b>: <span class="value">${formatBytes(data.monthly_traffic[1])}</span></div>`;
+                    if (data.monthly_traffic) {
+                        let m_rx = data.monthly_traffic[0];
+                        let m_tx = data.monthly_traffic[1];
+                        let m_bg = '';
+                        let limit_total = data.monthly_traffic.length > 2 ? data.monthly_traffic[2] : 0;
+                        let limit_rx = data.monthly_traffic.length > 3 ? data.monthly_traffic[3] : 0;
+                        let limit_tx = data.monthly_traffic.length > 4 ? data.monthly_traffic[4] : 0;
+
+                        let max_pct = 0;
+                        if (limit_total > 0) max_pct = Math.max(max_pct, (m_rx + m_tx) / limit_total);
+                        if (limit_rx > 0) max_pct = Math.max(max_pct, m_rx / limit_rx);
+                        if (limit_tx > 0) max_pct = Math.max(max_pct, m_tx / limit_tx);
+
+                        if (max_pct >= 0.95) m_bg = 'background-color: rgba(244, 67, 54, 0.25);';
+                        else if (max_pct >= 0.90) m_bg = 'background-color: rgba(255, 152, 0, 0.25);';
+                        detailsHTML += `<div class="item" style="${m_bg}"><div class="title">Month traffic</div><b>RX</b>: <span class="value">${formatBytes(m_rx)}</span><br><b>TX</b>: <span class="value">${formatBytes(m_tx)}</span></div>`;
+                    }
                     if (data.io)
                         detailsHTML += allTime('IO', data.io, 'Read', 'Written');
                     $('title').innerHTML = title;

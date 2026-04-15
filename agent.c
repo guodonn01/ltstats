@@ -260,20 +260,30 @@ void copy_cpu_model(void) {
             details.cpu_model_len = len;
         }
     } else {
-	FILE *fp;
+	    FILE *fp;
         char buffer[1024];
         int cpu_count = -1;
         char model_name[256] = {0};
         uint32 i = 0;
+        bool skip_rest = false;
 
         fp = popen("lscpu", "r");
         if (fp == NULL) {
             perror("Failed to run lscpu command");
             strcpy(details.cpu_model, "unknown");
             details.cpu_model_len = 8;
+            return;
         }
 
         while (fgets(buffer, sizeof(buffer), fp) != NULL) {
+            size_t len = strlen(buffer);
+            if (skip_rest) {
+                if (len > 0 && buffer[len - 1] == '\n') skip_rest = false;
+                continue;
+            }
+            if (len > 0 && buffer[len - 1] != '\n')
+                skip_rest = true;
+
             if (strncmp(buffer, "CPU(s):", 7) == 0) {
                 const char *ptr = buffer + 7;
                 while (*ptr && isspace((unsigned char)*ptr)) {
@@ -303,8 +313,9 @@ void copy_cpu_model(void) {
         }
 
         if (model_name[0] != '\0') {
-            strncpy(details.cpu_model, model_name, i+1);
-            details.cpu_model_len = i+1;
+            uint8 len = i > sizeof(details.cpu_model) ? sizeof(details.cpu_model) : i;
+            memcpy(details.cpu_model, model_name, len);
+            details.cpu_model_len = len;
         } else {
             strcpy(details.cpu_model, "unknown");
             details.cpu_model_len = 8;
@@ -591,8 +602,9 @@ int32 tcp_ping(const char *target, uint16 port) {
     char port_str[16];
     snprintf(port_str, sizeof(port_str), "%u", port);
     if (getaddrinfo(target, port_str, &hints, &res) != 0) return -1;
-    int sock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    int sock = socket(res->ai_family, res->ai_socktype | SOCK_CLOEXEC, res->ai_protocol);
     if (sock < 0) { freeaddrinfo(res); return -1; }
+    fcntl(sock, F_SETFD, FD_CLOEXEC);
     int flags = fcntl(sock, F_GETFL, 0);
     fcntl(sock, F_SETFL, flags | O_NONBLOCK);
     struct timeval start, end;
@@ -628,7 +640,7 @@ int32 icmp_ping(const char *target) {
     if (!is_valid_target(target)) return -1;
     char cmd[512];
     snprintf(cmd, sizeof(cmd), "ping -c 1 -w 10 %s", target);
-    FILE *fp = popen(cmd, "r");
+    FILE *fp = popen(cmd, "re");
     if (!fp) return -1;
     char line[256];
     int32 latency = -1;
@@ -756,6 +768,10 @@ int main(int argc, char **argv) {
     COMPILE_TIME_ASSERT(sizeof(jiffies_spent_t) == 96);
     if (argc < 2) {
         write(2, SLEN("Missing argument!\nmonitoring_agent DOMAIN [TOKEN_PATH] [MOUNT]...\n"));
+        return 99;
+    }
+    if (strlen(argv[1]) > 255) {
+        write(2, SLEN("DOMAIN argument is too long!\n"));
         return 99;
     }
     host = argv[1];

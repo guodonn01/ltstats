@@ -60,7 +60,7 @@ _Atomic int32 children;
 
 _Atomic bool *data_json_changed;
 _Atomic uint32 *monitoring_reload;
-_Atomic bool *admin_proc;
+_Atomic uint32 *admin_proc;
 
 typedef struct {
     char token[33];
@@ -90,11 +90,13 @@ typedef struct {
     char public_token[33];
     int fd;
     int latency_fd;
-    bool notification_sent[15]; // offline, cpu_usage, cpu_iowait, cpu_steal, ram_usage, swap_usage, disk_usage, net_rx_bps, net_tx_bps, disk_read_bps, disk_write_tx_bps, latency_ms, traffic_total, traffic_rx, traffic_tx
+    uint32 notification_sent[16]; // offline, cpu_usage, cpu_iowait, cpu_steal, ram_usage, swap_usage, disk_usage, net_rx_bps, net_tx_bps, disk_read_bps, disk_write_tx_bps, latency_ms, traffic_total, traffic_rx, traffic_tx, expire
     json_object *name;
     json_object *monitoring_settings;
     bool monthly_traffic_enabled;
     uint8 monthly_billing_day;
+    uint8 billing_cycle;
+    uint64 expire_date;
     time_t next_reset_time;
     uint64 rx_total;
     uint64 tx_total;

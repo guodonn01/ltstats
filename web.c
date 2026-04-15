@@ -7,7 +7,7 @@ json_object *parse_body_json(void) {
     uint16 body = get_http_body();
     body_read_cont = false;
     if (!body && sock_ready(client, true, 4)) {
-        int tmp = read(client, http_buf + len, sizeof(http_buf) - len);
+        int tmp = read(client, http_buf + len, sizeof(http_buf) - len - 1);
         if (tmp <= 0)
             return NULL;
         len += tmp;
@@ -71,8 +71,11 @@ Admin APIs:
 void admin_process_request(uint8 state) {
     if (state == ADMIN_STATE_LOGIN) { // POST /admin/login
         json_object *body = parse_body_json(), *hash;
-        while (!body && body_read_cont && sock_ready(client, false, 1) && (len = read(client, http_buf, sizeof(http_buf) - 1)) > 0)
+        uint32 total_read = len;
+        while (!body && body_read_cont && sock_ready(client, true, 1) && (len = read(client, http_buf, sizeof(http_buf) - 1)) > 0) {
             body = parse_additional();
+            if ((total_read += len) > 1024 * 1024) break;
+        }
         const char *hash_str;
         if (!body || !json_object_object_get_ex(body, "hash", &hash) || !json_object_is_type(hash, json_type_string) || json_object_get_string_len(hash) != 64 || !(hash_str = json_object_get_string(hash)))
             return;
@@ -88,33 +91,36 @@ void admin_process_request(uint8 state) {
         return;
     }
     if (http_buf_compare("", "GET /admin/logged_in")) {
-        __atomic_store_n(admin_proc, false, __ATOMIC_RELAXED);
         client_write("HTTP/1.1 200\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
     } else if (http_buf_compare("", "GET /admin/data")) {
-        __atomic_store_n(admin_proc, false, __ATOMIC_RELAXED);
         client_write_json(data_json);
     } else if (http_buf_compare("", "POST /admin/data")) {
         json_object *new = parse_body_json(), *hash;
         const char *hash_str;
         int opts = fcntl(client, F_GETFL);
-        if (opts < 0)
+        if (opts < 0) {
+            __atomic_store_n(admin_proc, 0, __ATOMIC_RELEASE);
             return;
+        }
         fcntl(client, F_SETFL, opts & (~O_NONBLOCK)); // set to blocking, otherwise it doesn't work with some (old) kernel versions
-        while (!new && body_read_cont && (len = read(client, http_buf, sizeof(http_buf) - 1)) > 0)
+        uint32 total_read = len;
+        while (!new && body_read_cont && (len = read(client, http_buf, sizeof(http_buf) - 1)) > 0) {
             new = parse_additional();
+            if ((total_read += len) > 10 * 1024 * 1024) break;
+        }
         if (!new || !json_object_is_type(new, json_type_object) || !json_object_object_get_ex(new, "hash", &hash) || !json_object_is_type(hash, json_type_string) || json_object_get_string_len(hash) != 64 || !(hash_str = json_object_get_string(hash))) {
-            __atomic_store_n(admin_proc, false, __ATOMIC_RELAXED);
+            __atomic_store_n(admin_proc, 0, __ATOMIC_RELEASE);
             return;
         }
         json_object *current_json_time_obj, *json_time_obj;
         uint64 current_json_time, json_time;
         if (!json_object_object_get_ex(data_json, "time", &current_json_time_obj) || !json_object_object_get_ex(new, "time", &json_time_obj) || !json_object_is_type(current_json_time_obj, json_type_int) || !json_object_is_type(json_time_obj, json_type_int) || !(current_json_time = json_object_get_uint64(current_json_time_obj))) {
-            __atomic_store_n(admin_proc, false, __ATOMIC_RELAXED);
+            __atomic_store_n(admin_proc, 0, __ATOMIC_RELEASE);
             return;
         }
         json_time = json_object_get_uint64(json_time_obj);
         if (json_time && json_time != current_json_time) {
-            __atomic_store_n(admin_proc, false, __ATOMIC_RELAXED);
+            __atomic_store_n(admin_proc, 0, __ATOMIC_RELEASE);
             client_write("HTTP/1.1 409\r\nContent-Length: 0\r\n\r\nConnection: close\r\n");
             return;
         }
@@ -123,18 +129,17 @@ void admin_process_request(uint8 state) {
         const char *json_str = json_object_to_json_string_length(new, JSON_C_TO_STRING_PLAIN, &json_len);
         int tmp, fd = open("data.json.new", O_WRONLY | O_TRUNC | O_CREAT, S_IRUSR | S_IWUSR);
         if (!json_str || !json_len || fd == -1) {
-            __atomic_store_n(admin_proc, false, __ATOMIC_RELAXED);
             close(fd);
+            __atomic_store_n(admin_proc, 0, __ATOMIC_RELEASE);
             return;
         }
         while (written < json_len && (tmp = write(fd, json_str + written, json_len - written)) > 0)
             written += tmp;
         close(fd);
         if (written != json_len || rename("data.json.new", "data.json")) {
-            __atomic_store_n(admin_proc, false, __ATOMIC_RELAXED);
+            __atomic_store_n(admin_proc, 0, __ATOMIC_RELEASE);
             return;
         }
-        __atomic_store_n(admin_proc, false, __ATOMIC_RELAXED);
         __atomic_store_n(data_json_changed, true, __ATOMIC_RELAXED);
         uint16 len = 0;
         str_append(http_buf, &len, "HTTP/1.1 200\r\nContent-Length: 0\r\nConnection: close\r\n");
@@ -146,6 +151,7 @@ void admin_process_request(uint8 state) {
         str_append(http_buf, &len, "\r\n");
         client_write_len(http_buf, len);
     }
+    __atomic_store_n(admin_proc, 0, __ATOMIC_RELEASE);
 }
 
 enum {
@@ -251,10 +257,11 @@ json_object *get_monitor_details_json(monitor_details_t *monitor, json_object *m
             uint32 aligned_lat_file_len = lat_file_len - (lat_file_len % sizeof(latency_stat_t));
             if (aligned_lat_file_len >= sizeof(latency_stat_t)) {
                 latency_stat_t l_buf[20];
+                int32 lat_read_len;
                 uint32 to_read = min(aligned_lat_file_len, sizeof(l_buf));
                 to_read -= to_read % sizeof(latency_stat_t);
-                if (to_read > 0 && pread(monitor->latency_fd, l_buf, to_read, aligned_lat_file_len - to_read) > 0) {
-                    uint32 count = to_read / sizeof(latency_stat_t);
+                if (to_read > 0 && (lat_read_len = pread(monitor->latency_fd, l_buf, to_read, aligned_lat_file_len - to_read)) > 0) {
+                    uint32 count = lat_read_len / sizeof(latency_stat_t);
                     uint64 sum = 0;
                     uint32 valid = 0;
                     for (uint32 i = 0; i < count; i++) {
@@ -460,13 +467,15 @@ void api_data(void) {
             }
         }
     }
-    uint32 file_len = fd_size(monitor->fd), total_elements = file_len / sizeof(stats_t), go_back_n_elements = elements * (back + 1), pos = 0, average_over_n_elements = elements / 360,
+    uint32 file_len = fd_size(monitor->fd);
+    uint32 aligned_file_len = file_len - (file_len % sizeof(stats_t));
+    uint32 total_elements = aligned_file_len / sizeof(stats_t), go_back_n_elements = elements * (back + 1), pos = 0, average_over_n_elements = elements / 360,
            count_for_avg = 0,
            count_for_datapoint_avg = 0,
            remaining_read = elements * sizeof(stats_t);
     if (go_back_n_elements < total_elements)
         pos = sizeof(stats_t) * (total_elements - go_back_n_elements);
-    if (pos + remaining_read > file_len)
+    if (pos + remaining_read > aligned_file_len)
         remaining_read = total_elements * sizeof(stats_t) - pos;
     double max[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 }, // cpu usage, iowait, steal, ram usage, swap usage, disk usage
            sum_for_avg[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 },
@@ -480,8 +489,9 @@ void api_data(void) {
     int32 read_len;
     bool save_because_downtime = false;
     uint32 first_stat_time = 0;
-    while (remaining_read && (read_len = pread(monitor->fd, http_buf, min(remaining_read, min(sizeof(stats_t) * (sizeof(http_buf) / sizeof(stats_t)), file_len - pos)), pos)) > 0) {
+    while (remaining_read && (read_len = pread(monitor->fd, http_buf, min(remaining_read, min(sizeof(stats_t) * (sizeof(http_buf) / sizeof(stats_t)), aligned_file_len - pos)), pos)) > 0) {
         uint16 count = read_len / sizeof(stats_t);
+        if (!count) break;
         pos += count * sizeof(stats_t);
         remaining_read -= count * sizeof(stats_t);
         for (uint16 i = 0; i < count; ++i) {
@@ -658,6 +668,21 @@ void api_data(void) {
         if (monthly_traffic_json) {
             json_object_array_add(monthly_traffic_json, json_object_new_uint64(monitor->monthly_rx_total));
             json_object_array_add(monthly_traffic_json, json_object_new_uint64(monitor->monthly_tx_total));
+            
+            uint64 limit_total = 0, limit_rx = 0, limit_tx = 0;
+            json_object *monitoring_settings, *el;
+            if (json_object_array_length(monitor_obj) > 4 && (monitoring_settings = json_object_array_get_idx(monitor_obj, 4)) && json_object_is_type(monitoring_settings, json_type_array)) {
+                if (json_object_array_length(monitoring_settings) > 12 && (el = json_object_array_get_idx(monitoring_settings, 12)) && json_object_is_type(el, json_type_int))
+                    limit_total = json_object_get_uint64(el);
+                if (json_object_array_length(monitoring_settings) > 13 && (el = json_object_array_get_idx(monitoring_settings, 13)) && json_object_is_type(el, json_type_int))
+                    limit_rx = json_object_get_uint64(el);
+                if (json_object_array_length(monitoring_settings) > 14 && (el = json_object_array_get_idx(monitoring_settings, 14)) && json_object_is_type(el, json_type_int))
+                    limit_tx = json_object_get_uint64(el);
+            }
+            json_object_array_add(monthly_traffic_json, json_object_new_uint64(limit_total));
+            json_object_array_add(monthly_traffic_json, json_object_new_uint64(limit_rx));
+            json_object_array_add(monthly_traffic_json, json_object_new_uint64(limit_tx));
+            
             json_object_object_add(response, "monthly_traffic", monthly_traffic_json);
         }
     }

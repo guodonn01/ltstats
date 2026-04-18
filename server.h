@@ -154,4 +154,6 @@ enum {
 
 #define TO_DOUBLE_FROM_TWO_UINTS(data) ((double)data##_before_decimal + ((double)data##_after_decimal / 100.0))
 
+void notify(json_object *exec, json_object *name, char *public_token, char *type, bool still_met, uint64 value);
+
 #endif

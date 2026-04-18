@@ -39,6 +39,15 @@ format_value() {
 
 FORMATTED_VALUE=$(format_value "$VALUE")
 
+if [ "$TYPE" = "LOGIN" ]; then
+    txt="🔐 <b>Admin Login</b>"$'\n\n'"A new successful login to the <b>ltstats</b> admin interface was detected."
+    curl --max-time 20 -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+        -d chat_id="${CHAT_ID}" \
+        -d parse_mode="HTML" \
+        --data-urlencode text="$txt" > /dev/null
+    exit 0
+fi
+
 if [ "$STILL_MET" = "TRUE" ]; then
     subject="🚨 <b>$TYPE</b> threshold exceeded"
     message="Alert condition <b>$TYPE</b> detected for <b>$NAME</b>."

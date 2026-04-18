@@ -79,10 +79,41 @@ void admin_process_request(uint8 state) {
         const char *hash_str;
         if (!body || !json_object_object_get_ex(body, "hash", &hash) || !json_object_is_type(hash, json_type_string) || json_object_get_string_len(hash) != 64 || !(hash_str = json_object_get_string(hash)))
             return;
+            
+        char client_ip[64] = "unknown";
+        char *xff = strstr(http_buf, "X-Forwarded-For: ");
+        if (!xff) xff = strstr(http_buf, "x-forwarded-for: ");
+        if (xff) {
+            xff += 17;
+            char *end = strpbrk(xff, ",\r\n");
+            size_t ip_len = end ? (size_t)(end - xff) : strlen(xff);
+            if (ip_len > 0 && ip_len < sizeof(client_ip)) {
+                memcpy(client_ip, xff, ip_len);
+                client_ip[ip_len] = '\0';
+            }
+        }
+
         if (memcmp(hash_str, admin_hash, 64)) { // indicate error to the client
+            FILE *log_file = fopen("/var/log/ltstats.log", "a");
+            if (log_file) {
+                time_t now = time(NULL);
+                struct tm *tm_info = localtime(&now);
+                char time_str[26];
+                strftime(time_str, 26, "%Y-%m-%d %H:%M:%S", tm_info);
+                fprintf(log_file, "[%s] Failed login attempt from IP: %s\n", time_str, client_ip);
+                fclose(log_file);
+            }
             client_write("HTTP/1.1 401\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
             return;
         }
+        
+        json_object *notifications, *exec;
+        if (json_object_object_get_ex(data_json, "notifications", &notifications) && json_object_object_get_ex(notifications, "exec", &exec) && json_object_is_type(exec, json_type_array) && json_object_array_length(exec) > 0) {
+            json_object *name_obj = json_object_new_string("Admin Interface");
+            notify(exec, name_obj, "ADMIN", "LOGIN", true, 0);
+            json_object_put(name_obj);
+        }
+        
         uint16 len = 0;
         str_append(http_buf, &len, "HTTP/1.1 200\r\nContent-Length: 0\r\nConnection: close\r\nSet-Cookie: hash=");
         str_append_len(http_buf, &len, hash_str, 64);

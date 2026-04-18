@@ -589,11 +589,22 @@
                     type="date" id="monitor-expire-date" style="margin-left: 5px;"></label>
             <label class="line" id="monitor-monthly-billing-day-container" style="display:none;">Billing start date
                 (1-31):<input type="number" id="monitor-monthly-billing-day" min="1" max="31" value="1"></label>
+            <div class="line threshold-header">Metric Aliases:</div>
+            <div class="line">
+                <div class="grid aliases-grid"><label>CPU Usage:<input type="text" id="alias-cpu_usage"
+                            placeholder="e.g. Temperature (°C)"></label><label>CPU IOWait:<input type="text"
+                            id="alias-cpu_iowait" placeholder="e.g. Battery (%)"></label><label>CPU Steal:<input
+                            type="text" id="alias-cpu_steal"></label><label>RAM
+                        Usage:<input type="text" id="alias-ram_usage"></label><label>Swap Usage:<input type="text"
+                            id="alias-swap_usage"></label><label>Disk Usage:<input type="text"
+                            id="alias-disk_usage"></label></div>
+            </div>
             <div class="line threshold-header">Monitoring thresholds:<button type="button"
                     onclick="applyDefaults();">Apply defaults</button><button type="button"
                     onclick="applyToAll();">Apply to all</button></div>
             <div class="line">
-                <div class="grid"><label>Offline (minutes):<input type="number" min="0"></label><label>CPU Usage
+                <div class="grid thresholds-grid"><label>Offline (minutes):<input type="number"
+                            min="0"></label><label>CPU Usage
                         (%):<input type="number" min="1" max="100"></label><label>CPU IOWait (%):<input type="number"
                             min="1" max="100"></label><label>CPU Steal (%):<input type="number" min="1"
                             max="100"></label><label>RAM Usage (%):<input type="number" min="1"
@@ -664,7 +675,8 @@
                     rows="3"></textarea></label>
             <div class="line threshold-header">Default monitoring thresholds:</div>
             <div class="line">
-                <div class="grid"><label>Offline (minutes):<input type="number" min="0"></label><label>CPU Usage
+                <div class="grid thresholds-grid"><label>Offline (minutes):<input type="number"
+                            min="0"></label><label>CPU Usage
                         (%):<input type="number" min="1" max="100"></label><label>CPU IOWait (%):<input type="number"
                             min="1" max="100"></label><label>CPU Steal (%):<input type="number" min="1"
                             max="100"></label><label>RAM Usage (%):<input type="number" min="1"
@@ -879,7 +891,7 @@
         function editMonitor(token = null) {
             editing = token;
             $('monitor-modal').querySelector('h2').textContent = token ? 'Edit monitor' : 'Add monitor';
-            $('monitor-modal').querySelectorAll('.grid input,#monitor-note,#monitor-name').forEach(input => input.value = '');
+            $('monitor-modal').querySelectorAll('.thresholds-grid input,#monitor-note,#monitor-name').forEach(input => input.value = '');
             $('monitor-public').checked = true;
             $('monitor-note-public').checked = false;
             $('monitor-additional-paths').value = '';
@@ -890,6 +902,7 @@
             $('monitor-billing-cycle').value = 0;
             $('monitor-expire-date').value = '';
             $('monitor-expire-date-container').style.display = 'none';
+            ['cpu_usage', 'cpu_iowait', 'cpu_steal', 'ram_usage', 'swap_usage', 'disk_usage'].forEach(k => $('alias-' + k).value = '');
             if (token) {
                 var m = data.monitors[token];
                 $('monitor-name').value = m[1];
@@ -902,7 +915,7 @@
                     $('monitor-note-public').checked = false;
                 }
                 if (m[4])
-                    $('monitor-modal').querySelectorAll('.grid input').forEach((element, index) => {
+                    $('monitor-modal').querySelectorAll('.thresholds-grid input').forEach((element, index) => {
                         var val = m[4][index] !== undefined && m[4][index] !== false ? m[4][index] : '';
                         element.value = element.type === 'text' && val !== '' ? formatBytesAdmin(val) : val;
                     });
@@ -924,6 +937,12 @@
                     }
                     $('monitor-expire-date-container').style.display = m[8].cycle == 0 ? 'none' : 'block';
                 }
+                if (m[10] && typeof m[10] === 'object') {
+                    Object.keys(m[10]).forEach(k => {
+                        var el = $('alias-' + k);
+                        if (el) el.value = m[10][k];
+                    });
+                }
             } else
                 applyDefaults();
             $('monitor-modal').classList.remove('hidden');
@@ -931,7 +950,7 @@
 
         function parseGrid(id) {
             var d = [];
-            $(id).querySelectorAll('.grid input').forEach((e, i) => {
+            $(id).querySelectorAll('.thresholds-grid input').forEach((e, i) => {
                 if (e.type === 'text') {
                     d[i] = parseBytesAdmin(e.value) || false;
                 } else {
@@ -978,6 +997,13 @@
                 cycle: cycle,
                 date: expireDate ? Math.floor(new Date(expireDate).getTime() / 1000) : 0
             };
+            if (!monitor[9]) monitor[9] = [];
+            var aliases = {};
+            ['cpu_usage', 'cpu_iowait', 'cpu_steal', 'ram_usage', 'swap_usage', 'disk_usage'].forEach(k => {
+                var val = $('alias-' + k).value.trim();
+                if (val !== '') aliases[k] = val;
+            });
+            monitor[10] = Object.keys(aliases).length > 0 ? aliases : {};
             data.monitors[token] = monitor;
             possiblyChanged();
             closeModals();
@@ -1022,7 +1048,7 @@
         function applyDefaults() {
             if (!data.notifications.default)
                 return;
-            $('monitor-modal').querySelectorAll('.grid input').forEach((element, index) => {
+            $('monitor-modal').querySelectorAll('.thresholds-grid input').forEach((element, index) => {
                 var val = data.notifications.default[index] !== undefined && data.notifications.default[index] !== false ? data.notifications.default[index] : '';
                 element.value = element.type === 'text' && val !== '' ? formatBytesAdmin(val) : val;
             });
@@ -1148,7 +1174,7 @@
             $('notification-sample').value = n.sample;
             $('notification-exec').value = n.exec.join(' ');
             if (n.default)
-                $('notification-settings-modal').querySelectorAll('.grid input').forEach((element, index) => {
+                $('notification-settings-modal').querySelectorAll('.thresholds-grid input').forEach((element, index) => {
                     var val = n.default[index] !== undefined && n.default[index] !== false ? n.default[index] : '';
                     element.value = element.type === 'text' && val !== '' ? formatBytesAdmin(val) : val;
                 });

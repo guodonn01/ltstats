@@ -93,6 +93,7 @@ typedef struct {
     uint32 notification_sent[16]; // offline, cpu_usage, cpu_iowait, cpu_steal, ram_usage, swap_usage, disk_usage, net_rx_bps, net_tx_bps, disk_read_bps, disk_write_tx_bps, latency_ms, traffic_total, traffic_rx, traffic_tx, expire
     json_object *name;
     json_object *monitoring_settings;
+    json_object *aliases;
     bool monthly_traffic_enabled;
     uint8 monthly_billing_day;
     uint8 billing_cycle;

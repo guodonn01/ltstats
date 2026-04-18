@@ -321,21 +321,25 @@ Output json:
 */
 
 void api_page(void) {
-    json_object *page_name, *page_monitors, *response, *response_monitors, *traffic;
+    json_object *page_name, *page_monitors, *response, *response_monitors, *traffic, *aliases_obj;
     bool admin = is_logged_in();
     uint8 state = get_page_from_buf(strlen("GET /api/page/"), &page_name, &page_monitors, admin);
-    if (state == PAGE_ERROR || state == PAGE_PERMISSION_ERROR || !(response = json_object_new_object()) || !(response_monitors = json_object_new_array()) || !(traffic = json_object_new_array()) || json_object_object_add(response, "name", page_name) || json_object_object_add(response, "monitors", response_monitors) || json_object_object_add(response, "traffic", traffic))
+    if (state == PAGE_ERROR || state == PAGE_PERMISSION_ERROR || !(response = json_object_new_object()) || !(response_monitors = json_object_new_array()) || !(traffic = json_object_new_array()) || !(aliases_obj = json_object_new_object()) || json_object_object_add(response, "name", page_name) || json_object_object_add(response, "monitors", response_monitors) || json_object_object_add(response, "traffic", traffic) || json_object_object_add(response, "aliases", aliases_obj))
         return;
     uint32 now = time(NULL);
     uint64 rx = 0, tx = 0;
     if (state == PAGE_SUCCESS)
         for (uint32 pos = 0, count = json_object_array_length(page_monitors); pos < count; ++pos) {
-            json_object *public_id = json_object_array_get_idx(page_monitors, pos), *monitor_info, *monitor_name;
+            json_object *public_id = json_object_array_get_idx(page_monitors, pos), *monitor_info, *monitor_name, *monitor_aliases;
             const char *public_id_str;
             if (!json_object_is_type(public_id, json_type_string) || json_object_get_string_len(public_id) != 32 || !(public_id_str = json_object_get_string(public_id)) ||
                 !json_object_object_get_ex(monitors, public_id_str, &monitor_info) ||
                 !(monitor_name = json_object_array_get_idx(monitor_info, 1)) || !json_object_is_type(monitor_name, json_type_string))
                 continue;
+            
+            if (json_object_array_length(monitor_info) > 10 && (monitor_aliases = json_object_array_get_idx(monitor_info, 10)) && json_object_is_type(monitor_aliases, json_type_object)) {
+                json_object_object_add(aliases_obj, public_id_str, json_object_get(monitor_aliases));
+            }
             api_page_add_element(response_monitors, &rx, &tx, monitor_name, public_id, public_id_str, now, -1, admin);
         }
     else if (state == PAGE_SHOW_ALL) {
@@ -343,10 +347,13 @@ void api_page(void) {
 #pragma GCC diagnostic ignored "-Wpedantic" // allow ({}) in foreach
         uint32 pos = 0;
         json_object_object_foreach(monitors, public_id_str, val) {
-            json_object *monitor_name, *public_id;
+            json_object *monitor_name, *public_id, *monitor_aliases;
             if (strlen(public_id_str) != 32 || !(monitor_name = json_object_array_get_idx(val, 1)) || !(public_id = json_object_new_string_len(public_id_str, 32))) {
                 ++pos;
                 continue;
+            }
+            if (json_object_array_length(val) > 10 && (monitor_aliases = json_object_array_get_idx(val, 10)) && json_object_is_type(monitor_aliases, json_type_object)) {
+                json_object_object_add(aliases_obj, public_id_str, json_object_get(monitor_aliases));
             }
             api_page_add_element(response_monitors, &rx, &tx, monitor_name, public_id, public_id_str, now, (int32)pos, admin);
             ++pos;
@@ -413,7 +420,7 @@ void api_data(void) {
             return;
     public_id[32] = '\0';
     monitor_details_t *monitor = get_monitor_details_by_public(public_id);
-    json_object *monitor_obj, *name, *response, *details_json, *max_json, *avg_json, *traffic_json = NULL, *io_json = NULL, *data_json, *hidden_json, *notes, *latency_json;
+    json_object *monitor_obj, *name, *response, *details_json, *max_json, *avg_json, *traffic_json = NULL, *io_json = NULL, *data_json, *hidden_json, *notes, *latency_json, *aliases_json = NULL;
     bool admin = is_logged_in();
     if (!monitor || !json_object_object_get_ex(monitors, public_id, &monitor_obj) || !json_object_is_type(monitor_obj, json_type_array) || !(name = json_object_array_get_idx(monitor_obj, 1)) || !json_object_is_type(name, json_type_string) || !(notes = json_object_array_get_idx(monitor_obj, 3)))
         return;
@@ -452,6 +459,10 @@ void api_data(void) {
         json_object_object_add(response, "hidden", hidden_json) ||
         json_object_object_add(response, "notes", notes))
         return;
+        
+    if (json_object_array_length(monitor_obj) > 10 && (aliases_json = json_object_array_get_idx(monitor_obj, 10)) && json_object_is_type(aliases_json, json_type_object)) {
+        json_object_object_add(response, "aliases", json_object_get(aliases_json));
+    }
         
     json_object *latency_targets_config = NULL;
     uint32 valid_target_ids[16];

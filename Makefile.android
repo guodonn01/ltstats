@@ -1,0 +1,53 @@
+# Makefile for building the LTstats agent on Android (e.g., in Termux)
+
+.PHONY: clean all
+
+# Use clang, the default compiler in Termux/Android.
+CC = clang
+
+# CFLAGS for dynamic build.
+# -I./BearSSL/inc is for BearSSL headers.
+# -pthread is for threading support.
+CFLAGS = -fno-strict-aliasing -Ofast -O3 -Wall -Wextra -Wno-deprecated-declarations -I./BearSSL/inc -pthread
+
+# Specific commit for BearSSL for reproducibility.
+BEARSSL_COMMIT = 3c040368f6791553610e362401db1efff4b4c5b8
+
+# Default target
+all: ltstats_agent_android
+
+# Target to build the agent.
+# It depends on the source file, BearSSL static library, and the Trust Anchors header.
+ltstats_agent_android: agent_android.c libbearssl.a TA.h
+	$(CC) $(CFLAGS) agent_android.c libbearssl.a -o ltstats_agent_android
+	@echo "ltstats_agent_android has been built successfully."
+
+# Target to build the BearSSL static library.
+libbearssl.a: BearSSL/build/brssl
+	@echo "BearSSL library is already built."
+
+# Target to generate the Trust Anchors header file from Mozilla's CA bundle.
+# It downloads the cert bundle if not present.
+TA.h: BearSSL/build/brssl
+	@if [ ! -f "cacert.pem" ]; then \
+		echo "Downloading CA certificates bundle..."; \
+		curl -so cacert.pem https://curl.se/ca/cacert.pem; \
+	fi
+	@echo "Generating TA.h from CA bundle..."
+	./BearSSL/build/brssl ta cacert.pem > TA.h
+
+# Target to build BearSSL tools, which includes 'brssl' needed for TA.h
+BearSSL/build/brssl:
+	@if [ ! -d "BearSSL" ]; then \
+		echo "Cloning BearSSL repository..."; \
+		git clone https://www.bearssl.org/git/BearSSL; \
+	fi
+	@echo "Building BearSSL..."
+	sh -c 'cd BearSSL && git checkout ${BEARSSL_COMMIT} && make CC=$(CC) -j$$(nproc) build/libbearssl.a build/brssl'
+	@echo "Copying BearSSL library..."
+	cp BearSSL/build/libbearssl.a .
+
+# Target to clean up build artifacts.
+clean:
+	@echo "Cleaning up..."
+	rm -rf BearSSL libbearssl.a ltstats_agent_android TA.h cacert.pem

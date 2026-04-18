@@ -40,13 +40,13 @@ format_value() {
 FORMATTED_VALUE=$(format_value "$VALUE")
 
 if [ "$STILL_MET" = "TRUE" ]; then
-    subject="🚨 $TYPE threshold exceeded"
+    subject="🚨 <b>$TYPE</b> threshold exceeded"
     message="Alert condition <b>$TYPE</b> detected for <b>$NAME</b>."
-    [ -n "$VALUE" ] && message="$message\nCurrent value: <b>$FORMATTED_VALUE</b>"
+    [ -n "$VALUE" ] && message="$message<br>Current value: <b>$FORMATTED_VALUE</b>"
 else
-    subject="✅ $TYPE threshold no longer exceeded"
+    subject="✅ <b>$TYPE</b> threshold no longer exceeded"
     message="Alert condition <b>$TYPE</b> resolved for <b>$NAME</b>."
-    [ -n "$VALUE" ] && message="$message\nCurrent value: <b>$FORMATTED_VALUE</b>"
+    [ -n "$VALUE" ] && message="$message<br>Current value: <b>$FORMATTED_VALUE</b>"
 fi
 
 if [ "$TYPE" = "DOWN" ]; then

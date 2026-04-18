@@ -258,6 +258,13 @@ bool parse_data_json(void) {
                         new_details[current_details_pos].expire_date = json_object_get_uint64(date_obj);
                 }
                 
+                json_object *aliases_obj;
+                if (json_object_array_length(val) > 10 && (aliases_obj = json_object_array_get_idx(val, 10)) && json_object_is_type(aliases_obj, json_type_object)) {
+                    new_details[current_details_pos].aliases = aliases_obj;
+                } else {
+                    new_details[current_details_pos].aliases = NULL;
+                }
+                
                 notification_monitor_details_t *tmp_monitor;
                 if ((tmp_monitor = get_notification_monitor_details_by_private(token_str))) {
                     new_details[current_details_pos].fd = tmp_monitor->fd;
@@ -1001,15 +1008,26 @@ start:
                 compare_value = compare_value * 10 / 9;
             }
 
+            char *notif_type = types[y - 1];
+            if (details->aliases) {
+                char lower_type[32];
+                int k;
+                for (k = 0; types[y-1][k]; k++) lower_type[k] = tolower(types[y-1][k]);
+                lower_type[k] = '\0';
+                json_object *alias_val;
+                if (json_object_object_get_ex(details->aliases, lower_type, &alias_val) && json_object_is_type(alias_val, json_type_string)) {
+                    notif_type = (char *)json_object_get_string(alias_val);
+                }
+            }
             if (compare_value >= threshold) {
                     if (!details->notification_sent[y]) {
                         details->notification_sent[y] = 1;
-                        notify(exec, details->name, details->public_token, types[y - 1], true, averages[y - 1]);
+                        notify(exec, details->name, details->public_token, notif_type, true, averages[y - 1]);
                         notif_changed = true;
                     }
                 } else if (details->notification_sent[y]) {
                     details->notification_sent[y] = 0;
-                    notify(exec, details->name, details->public_token, types[y - 1], false, averages[y - 1]);
+                    notify(exec, details->name, details->public_token, notif_type, false, averages[y - 1]);
                     notif_changed = true;
                 }
             }

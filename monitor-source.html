@@ -388,12 +388,12 @@
                 {
                     graph: state.charts.resources,
                     data: [
-                        [0, 'CPU', state.colors.cpu],
-                        [1, 'IOwait', state.colors.iowait],
-                        [2, 'Steal', state.colors.steal],
-                        [3, 'RAM', state.colors.ram],
-                        [4, 'Swap', state.colors.swap],
-                        [5, 'Disk', state.colors.disk]
+                        [0, state.data.aliases && state.data.aliases.cpu_usage || 'CPU', state.colors.cpu],
+                        [1, state.data.aliases && state.data.aliases.cpu_iowait || 'IOwait', state.colors.iowait],
+                        [2, state.data.aliases && state.data.aliases.cpu_steal || 'Steal', state.colors.steal],
+                        [3, state.data.aliases && state.data.aliases.ram_usage || 'RAM', state.colors.ram],
+                        [4, state.data.aliases && state.data.aliases.swap_usage || 'Swap', state.colors.swap],
+                        [5, state.data.aliases && state.data.aliases.disk_usage || 'Disk', state.colors.disk]
                     ]
                 },
                 {
@@ -423,10 +423,19 @@
                     charts[index].style.display = 'none';
                 else {
                     charts[index].style = '';
-                    graph.graph.updateOptions({
-                        series: graphData,
-                        colors: graphColors
-                    });
+                    if (index === 0) {
+                        graph.graph.updateOptions({
+                            series: graphData,
+                            colors: graphColors,
+                            title: { text: state.data.aliases && Object.keys(state.data.aliases).length > 0 ? 'Metrics' : 'Usage (%)' },
+                            yaxis: { title: { text: state.data.aliases && Object.keys(state.data.aliases).length > 0 ? 'Metrics' : 'Usage (%)' } }
+                        });
+                    } else {
+                        graph.graph.updateOptions({
+                            series: graphData,
+                            colors: graphColors
+                        });
+                    }
                 }
             });
 
@@ -487,12 +496,12 @@
             var timestamps = Object.keys(state.data.data), container = $('stats'), pos = 0, current = id => state.data.details.length !== 2 ? state.data.details[id] : false;
             container.innerHTML = '';
             [
-                { cur: current(5), name: 'CPU', type: 0, color: state.colors.cpu },
-                { cur: current(6), name: 'IOwait', type: 0, color: state.colors.iowait },
-                { cur: current(7), name: 'Steal', type: 0, color: state.colors.steal },
-                { cur: current(9), name: 'RAM', type: 0, color: state.colors.ram },
-                { cur: current(11), name: 'Swap', type: 0, color: state.colors.swap },
-                { cur: current(13), name: 'Disk', type: 0, color: state.colors.disk },
+                { cur: current(5), name: state.data.aliases && state.data.aliases.cpu_usage || 'CPU', key: 'cpu_usage', type: 0, color: state.colors.cpu },
+                { cur: current(6), name: state.data.aliases && state.data.aliases.cpu_iowait || 'IOwait', key: 'cpu_iowait', type: 0, color: state.colors.iowait },
+                { cur: current(7), name: state.data.aliases && state.data.aliases.cpu_steal || 'Steal', key: 'cpu_steal', type: 0, color: state.colors.steal },
+                { cur: current(9), name: state.data.aliases && state.data.aliases.ram_usage || 'RAM', key: 'ram_usage', type: 0, color: state.colors.ram },
+                { cur: current(11), name: state.data.aliases && state.data.aliases.swap_usage || 'Swap', key: 'swap_usage', type: 0, color: state.colors.swap },
+                { cur: current(13), name: state.data.aliases && state.data.aliases.disk_usage || 'Disk', key: 'disk_usage', type: 0, color: state.colors.disk },
                 { cur: current(14), name: `Download (${state.data.traffic ? formatBytes(state.data.traffic[0]) : ''})`, type: 1, color: state.colors.rx },
                 { cur: current(15), name: `Upload (${state.data.traffic ? formatBytes(state.data.traffic[1]) : ''})`, type: 1, color: state.colors.tx },
                 { cur: current(16), name: `Read IO (${state.data.io ? formatBytes(state.data.io[0]) : ''})`, type: 2, color: state.colors.read },
@@ -506,7 +515,7 @@
                     return;
                 var element = document.createElement('div');
                 element.className = 'item';
-                var formatter = [data => data.toFixed(2) + '%', data => formatNetworkSpeed(data), data => formatBytes(data) + '/s'][item.type];
+                var formatter = [data => data.toFixed(2) + (state.data.aliases && state.data.aliases[item.key] ? '' : '%'), data => formatNetworkSpeed(data), data => formatBytes(data) + '/s'][item.type];
                 element.innerHTML = `<div class="title" style="color:${item.color}">${item.name}</div><div>Average: <span class="value">${formatter(state.data.avg[pos])}</span></div><div>Maximum: <span class="value">${formatter(state.data.max[pos])}</span></div>`;
                 if (state.data.details.length != 2)
                     element.innerHTML += `<div>Current: <span class="value">${formatter(item.cur)}</span></div>`;
